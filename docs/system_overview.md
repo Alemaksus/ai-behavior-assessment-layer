@@ -5,6 +5,7 @@
 Voice-based conversational AI tutor.
 
 The system combines:
+
 - speech recognition
 - conversational interaction
 - structured lesson flow
@@ -16,7 +17,7 @@ The system operates as a guided conversational loop where each turn hinges on **
 
 User input (speech)
 → intent interpretation
-→ lesson progression decision (what to do next)
+→ lesson progression decision (what to do next in the lesson; this decision determines the direction of subsequent interaction)
 → system response (instruction / feedback / question)
 → next user input
 
@@ -34,6 +35,7 @@ Each stage builds on previous steps and assumes correct interpretation of user i
 ## Personalization Layer
 
 The system adapts learning based on:
+
 - selected proficiency level
 - observed responses
 - engagement patterns
