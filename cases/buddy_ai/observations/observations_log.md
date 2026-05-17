@@ -42,7 +42,7 @@ Master index of planned probes and observation records for AIRRA Case 002. Detai
 
 ## Scenarios not yet scheduled
 
-From `docs/test_design.md` (no observation records yet):
+From `../docs/test_design.md` (no observation records yet):
 
 | Scenario ID | Group | Status |
 |-------------|-------|--------|

@@ -16,7 +16,7 @@ Preserve execution context for comparison across app updates and repeated runs.
 
 ---
 
-Black-box session targeting **Scenario Group 1** from `docs/test_design.md`.
+Black-box session targeting **Scenario Group 1** from `../docs/test_design.md`.
 
 | Session field | Value |
 |---------------|-------|

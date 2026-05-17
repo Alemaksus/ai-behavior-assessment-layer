@@ -1,6 +1,6 @@
 # Session 02 — Feedback Integrity (Practice)
 
-Black-box session targeting **Scenario Group 2** from `docs/test_design.md`.
+Black-box session targeting **Scenario Group 2** from `../docs/test_design.md`.
 
 | Session field | Value |
 |---------------|-------|

@@ -11,7 +11,7 @@ Records describe **observable behavior only**. Do not state product defects or i
 | Field | Purpose |
 |-------|---------|
 | **Observation ID** | Unique ID (e.g. `OBS-001`). |
-| **Scenario ID** | From `docs/test_design.md` (e.g. `1.1`, `2.3`). |
+| **Scenario ID** | From `../docs/test_design.md` (e.g. `1.1`, `2.3`). |
 | **Claim** | Target claim name from test design (e.g. Voice-based interaction, Mastery learning). |
 | **Lesson stage** | Stage when the probe occurred (e.g. Warm-up, Practice). |
 | **Initial user intent** | What the learner was trying to do before the probe, as stated or implied in interaction. |
@@ -82,4 +82,4 @@ This field records **observed consequences**. Do not treat it as a hypothesis.
 
 ## AIRRA drift type (usage)
 
-Use the **potential drift pattern** label from `docs/test_design.md` for the scenario (e.g. “lesson proceeds on incorrect grounding”). This names a risk pattern to watch for—not a confirmed defect.
+Use the **potential drift pattern** label from `../docs/test_design.md` for the scenario (e.g. “lesson proceeds on incorrect grounding”). This names a risk pattern to watch for—not a confirmed defect.

@@ -1,46 +1,55 @@
-# AIRRA Case 002 — Conversational AI Tutor Behavior Assessment
+# AI Behavior Assessment Layer
 
-This repository contains a private AIRRA black-box assessment of a conversational AI tutor.
+This repository contains **AIRRA Behavioral Assessment** case studies: structured, black-box examinations of AI system behavior using observed or intentionally designed interaction scenarios.
 
-The case focuses on how a voice-based AI tutor behaves during real user interaction, with attention to:
+## What this is not
 
-- user intent interpretation
-- lesson-flow integrity
-- decision points across the lesson flow
-- feedback behavior
-- personalization signals
-- potential silent drift in perceived learning outcomes
+- a product
+- a universal testing framework
+- a scoring system
+- a dashboard
 
-The goal is not to reverse-engineer internal implementation or claim product defects.
+## What it contains
 
-Instead, this assessment explores whether a polished, coherent, and safe-looking AI learning workflow can still drift away from the learner’s actual intent or educational needs while maintaining coherent interaction, without producing visible errors.
+Assessments are built from:
 
-Evidence is anchored in **observable lesson behavior**; statements about **learning outcomes** are treated as downstream implications of that behavior, not as directly verified effects.
-
-## Assessment scope
-
-This case is based on:
-
-- publicly available product claims and workflow descriptions
-- black-box interaction scenarios
-- structured behavioral observations
-
-## Research focus
-
-The main question behind this case is:
-
-> Can a conversational AI tutor remain coherent and user-friendly while still producing subtly wrong learning-direction outcomes?
-
-## Planned artifacts
-
-- system overview
-- claim map
-- black-box test design
+- public claims
+- implied decision dependencies
+- runtime probes when accessible
 - observation logs
-- AIRRA analysis
-- scenario summaries
+- drift patterns
 
-## Status
+No runtime observations or findings are asserted here unless recorded in a case’s evidence files.
 
-Project initialized.  
-Behavioral mapping and black-box scenario design in progress.
+## Current cases
+
+### 1. Buddy.ai
+
+| | |
+|---|---|
+| **Path** | `cases/buddy_ai/` |
+| **Status** | Deferred runtime case |
+| **Reason** | Mobile-app runtime; possible subscription or device constraints |
+| **Current value** | Public claim analysis and deferred runtime probe design |
+
+### 2. Lindy AI
+
+| | |
+|---|---|
+| **Path** | `cases/lindy_ai/` |
+| **Status** | Active runtime candidate |
+| **Reason** | Browser SaaS with observable workflow and task execution; selected as active runtime assessment candidate |
+
+## Repository structure
+
+```
+cases/
+  buddy_ai/
+  lindy_ai/
+
+shared/
+  templates/
+  methodology/
+```
+
+Case-specific docs, sessions, and observations live under each `cases/<name>/` directory.
