@@ -1,6 +1,6 @@
 # Observations Log
 
-Master index of planned probes and observation records for AIRRA Case 002. Detail lives in session files; this log is the cross-session index.
+Master index of planned probes and observation records for the Buddy.ai case (`buddy_ai`). Detail lives in session files; this log is the cross-session index.
 
 **13 planned probes mapped** to scenario IDs below. No recorded observable evidence yet—entries are execution probes awaiting black-box runs.
 
@@ -53,4 +53,4 @@ From `../docs/test_design.md` (no observation records yet):
 
 ## Template
 
-New records: [observation_template.md](observation_template.md)
+New records: [observation_template.md](../../../shared/templates/observation_template.md)

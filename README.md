@@ -37,8 +37,9 @@ No runtime observations or findings are asserted here unless recorded in a caseâ
 | | |
 |---|---|
 | **Path** | `cases/lindy_ai/` |
-| **Status** | Active runtime candidate |
-| **Reason** | Browser SaaS with observable workflow and task execution; selected as active runtime assessment candidate |
+| **Status** | Potential runtime candidate |
+| **Reason** | Browser SaaS with potentially observable workflow and task execution |
+| **Current value** | Skeleton only; runtime access not validated in this repository; runtime assessment not started; no runtime evidence |
 
 ## Repository structure
 

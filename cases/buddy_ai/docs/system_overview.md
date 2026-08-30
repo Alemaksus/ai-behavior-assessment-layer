@@ -59,5 +59,5 @@ A small deviation in early interpretation can propagate through the entire lesso
 
 ## Scope note
 
-This overview is based on publicly described system behavior and observed interaction patterns.  
+This overview is based on publicly described system behavior and assessment design assumptions derived from the claim map and probe design. No runtime observations are recorded in this repository.  
 No assumptions are made about internal implementation.

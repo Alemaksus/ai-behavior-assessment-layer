@@ -35,7 +35,7 @@ Prepared for deferred execution; all entries are **planned** or **deferred** pro
 |----------|------|------|
 | Session plans | `sessions/session_01_intent_interpretation.md`, `sessions/session_02_feedback_integrity.md` | Warm-up intent and practice feedback scenarios |
 | Observation index | `observations/observations_log.md` | 13 planned probes mapped to scenario IDs |
-| Observation template | `observations/observation_template.md` | Field definitions for future records |
+| Observation template | `shared/templates/observation_template.md` | Field definitions for future records |
 
 Scenario logic in test design and session files remains useful when runtime access is available; it does not imply prior observation.
 

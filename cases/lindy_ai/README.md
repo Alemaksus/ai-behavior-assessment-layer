@@ -1,6 +1,6 @@
-# Lindy AI — Runtime Behavioral Assessment Case (skeleton)
+# Lindy AI — Potential Runtime Behavioral Assessment Case (skeleton)
 
-Black-box behavioral assessment case for Lindy AI. Listed in the repository root as an **active runtime candidate**; this folder is a **skeleton only**.
+Black-box behavioral assessment case for Lindy AI. Listed in the repository root as a **potential runtime candidate**; this folder is a **skeleton only**. Runtime access has not been validated in this repository. Runtime assessment has not started. No runtime evidence is recorded.
 
 ## Purpose
 
@@ -19,7 +19,7 @@ Document publicly stated claims, decision dependencies, and runtime probes when 
 
 ## Runtime (not started)
 
-Runtime evidence collection is **not started**. Browser-accessible workflow assessment may use `docs/runtime_surface.md` for future traces; probes and observations remain deferred until claim and probe design are populated.
+Runtime access has **not been validated** in this repository. Runtime evidence collection is **not started**; no runtime evidence exists. Browser-accessible workflow assessment may use `docs/runtime_surface.md` for future traces; probes and observations remain deferred until claim and probe design are populated.
 
 ## Notes
 
