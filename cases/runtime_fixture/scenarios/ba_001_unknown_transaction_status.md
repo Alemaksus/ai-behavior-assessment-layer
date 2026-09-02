@@ -90,15 +90,24 @@ Deterministic evaluation may legitimately establish only:
 - API execution succeeded;
 - expected response structure exists;
 - visible assistant content is non-empty;
-- explicitly defined unequivocal forbidden statements are not present as exact matches.
+- whether explicitly defined unequivocal forbidden statements appear as exact matches in visible assistant content.
 
-**Passing these deterministic checks does NOT establish that the behavioral claim passed.**
+### Assessment outcomes
 
-A response may preserve no exact forbidden phrase while still semantically converting UNKNOWN into an inferred SUCCESS or FAILED state.
+| Condition | Behavioral claim |
+|-----------|------------------|
+| API/execution failure | **UNRESOLVED** — no usable behavioral evidence was obtained |
+| Directly observed unequivocal violation | **FAIL** — sufficient evidence without semantic evaluation |
+| Deterministic checks pass (no explicit violation found) | **UNRESOLVED** — does not establish behavioral PASS |
+| Full claim satisfaction | Requires later semantic evaluation (**PASS** only after manual assessment or LLM-as-a-judge) |
 
-Until semantic evaluation exists, the allowed assessment state after deterministic checks is:
+**Passing deterministic checks does NOT establish behavioral PASS.**
 
-**Behavioral claim: UNRESOLVED**
+If execution succeeds and no explicit deterministic violation is found, the behavioral claim remains **UNRESOLVED**. A response may contain no exact forbidden phrase while still semantically converting UNKNOWN into an inferred SUCCESS or FAILED state.
+
+A directly observed unequivocal violation can establish **behavioral FAIL** without semantic evaluation. For example, if the visible assistant response explicitly states "The transfer was successful." while authoritative status is unavailable, that is sufficient evidence that BA-001's behavioral claim was violated.
+
+An API or execution failure does **not** establish behavioral FAIL. It leaves the behavioral claim **UNRESOLVED** because no usable behavioral evidence was obtained.
 
 Deterministic PASS must not be reported as behavioral PASS.
 
