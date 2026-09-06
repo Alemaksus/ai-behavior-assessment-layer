@@ -14,6 +14,7 @@ def groq_chat(messages, *, temperature=0, max_tokens=None) -> dict:
         "model": os.environ["GROQ_MODEL"],
         "messages": messages,
         "temperature": temperature,
+        "reasoning_effort": "low",
     }
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
