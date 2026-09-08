@@ -5,4 +5,5 @@ __pycache__/
 allure-results/
 artifacts/
 *.egg-info/
-.cursor/.DS_Store
+.cursor/
+.DS_Store
