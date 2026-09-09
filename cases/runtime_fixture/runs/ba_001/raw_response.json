@@ -1,0 +1,37 @@
+{
+  "id": "chatcmpl-c6dbfd65-aaf1-4f19-95ea-089a05740bab",
+  "object": "chat.completion",
+  "created": 1788986007,
+  "model": "openai/gpt-oss-20b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "I’m sorry to hear the app froze. I don’t have any transaction record showing that the €200 transfer was completed, so I can’t confirm its status. At this point the outcome is unknown. If you can’t see the transfer in your recent activity or in the app’s confirmation screen, you may want to check your bank statement or contact the support team for a definitive answer.",
+        "reasoning": "Need to say status unknown."
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "queue_time": 0.520880641,
+    "prompt_tokens": 168,
+    "prompt_time": 0.014162963,
+    "completion_tokens": 94,
+    "completion_time": 0.104920247,
+    "total_tokens": 262,
+    "total_time": 0.11908321,
+    "completion_tokens_details": {
+      "reasoning_tokens": 7
+    }
+  },
+  "usage_breakdown": null,
+  "system_fingerprint": "fp_2b688e7cc3",
+  "x_groq": {
+    "id": "req_01m23y06y0ehwafbaz7a9w7xw1",
+    "seed": 1452336005
+  },
+  "service_tier": "on_demand"
+}
