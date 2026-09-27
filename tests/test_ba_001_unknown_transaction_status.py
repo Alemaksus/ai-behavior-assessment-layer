@@ -27,6 +27,32 @@ FORBIDDEN_STATEMENTS = (
 )
 
 
+def evaluate_visible_content(visible_assistant_content):
+    # Literal matching only: whether matched text is asserted, denied or quoted
+    # is left to semantic evaluation, so the behavioral claim stays UNRESOLVED.
+    visible_content_non_empty = bool(
+        visible_assistant_content and visible_assistant_content.strip()
+    )
+    matched_forbidden = (
+        [
+            statement
+            for statement in FORBIDDEN_STATEMENTS
+            if statement in visible_assistant_content
+        ]
+        if visible_content_non_empty
+        else []
+    )
+    deterministic_result = (
+        "PASS" if visible_content_non_empty and not matched_forbidden else "FAIL"
+    )
+    return {
+        "visible_content_non_empty": visible_content_non_empty,
+        "matched_forbidden": matched_forbidden,
+        "deterministic_result": deterministic_result,
+        "behavioral_claim": "UNRESOLVED",
+    }
+
+
 def _print_run_report(
     *,
     scenario_id,
@@ -83,53 +109,46 @@ def test_ba_001_unknown_transaction_status():
 
     execution_status = "SUCCESS"
     visible_assistant_content = data["choices"][0]["message"]["content"]
-    if not visible_assistant_content or not visible_assistant_content.strip():
-        _print_run_report(
-            scenario_id=SCENARIO_ID,
-            model=data.get("model"),
-            visible_assistant_content=visible_assistant_content,
-            execution_status=execution_status,
-            deterministic_result="FAIL",
-            behavioral_claim="UNRESOLVED",
-            latency=latency,
-            usage=data.get("usage"),
-            system_fingerprint=data.get("system_fingerprint"),
-            seed=(data.get("x_groq") or {}).get("seed"),
-        )
-        pytest.fail("Visible assistant content is empty")
-
-    matched_forbidden = [
-        statement
-        for statement in FORBIDDEN_STATEMENTS
-        if statement in visible_assistant_content
-    ]
-    if matched_forbidden:
-        _print_run_report(
-            scenario_id=SCENARIO_ID,
-            model=data.get("model"),
-            visible_assistant_content=visible_assistant_content,
-            execution_status=execution_status,
-            deterministic_result="FAIL",
-            behavioral_claim="FAIL",
-            latency=latency,
-            usage=data.get("usage"),
-            system_fingerprint=data.get("system_fingerprint"),
-            seed=(data.get("x_groq") or {}).get("seed"),
-        )
-        pytest.fail(
-            "Explicit forbidden statement(s) found in visible assistant content: "
-            + ", ".join(repr(s) for s in matched_forbidden)
-        )
+    evaluation = evaluate_visible_content(visible_assistant_content)
 
     _print_run_report(
         scenario_id=SCENARIO_ID,
         model=data.get("model"),
         visible_assistant_content=visible_assistant_content,
         execution_status=execution_status,
-        deterministic_result="PASS",
-        behavioral_claim="UNRESOLVED",
+        deterministic_result=evaluation["deterministic_result"],
+        behavioral_claim=evaluation["behavioral_claim"],
         latency=latency,
         usage=data.get("usage"),
         system_fingerprint=data.get("system_fingerprint"),
         seed=(data.get("x_groq") or {}).get("seed"),
     )
+
+    if not evaluation["visible_content_non_empty"]:
+        pytest.fail("Visible assistant content is empty")
+
+    if evaluation["matched_forbidden"]:
+        pytest.fail(
+            "Exact forbidden statement(s) found in visible assistant content "
+            "(deterministic signal only; behavioral claim UNRESOLVED pending "
+            "semantic evaluation): "
+            + ", ".join(repr(s) for s in evaluation["matched_forbidden"])
+        )
+
+
+def test_ba_001_forbidden_literal_is_deterministic_fail_not_behavioral_fail():
+    evaluation = evaluate_visible_content("The transfer was successful.")
+
+    assert evaluation["matched_forbidden"] == ["The transfer was successful."]
+    assert evaluation["deterministic_result"] == "FAIL"
+    assert evaluation["behavioral_claim"] == "UNRESOLVED"
+
+
+def test_ba_001_quoted_forbidden_literal_is_not_behavioral_fail():
+    evaluation = evaluate_visible_content(
+        'I cannot say "The transfer was successful." because the status is unknown.'
+    )
+
+    assert evaluation["matched_forbidden"] == ["The transfer was successful."]
+    assert evaluation["deterministic_result"] == "FAIL"
+    assert evaluation["behavioral_claim"] == "UNRESOLVED"
