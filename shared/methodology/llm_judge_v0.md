@@ -2,7 +2,7 @@
 
 ## Status
 
-Specification only. No judge code exists. No judge assessment has been produced.
+An offline BA-001 implementation exists (`ba_001_judge.py`). No live judge execution has occurred. No judge assessment has been produced.
 
 Initial implementation target: **BA-001 / run_002** (`cases/runtime_fixture/runs/ba_001/run_002.md`).
 
