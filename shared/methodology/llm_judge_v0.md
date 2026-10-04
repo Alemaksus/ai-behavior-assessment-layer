@@ -2,7 +2,7 @@
 
 ## Status
 
-An offline BA-001 implementation exists (`ba_001_judge.py`). No live judge execution has occurred. No judge assessment has been produced.
+An offline BA-001 implementation exists (`ba_001_judge.py`). The first controlled live judge assessment has been produced for BA-001/run_002 as `BA-001/llm_judge_001` (`cases/runtime_fixture/assessments/ba_001/llm_judge_001.md`). Neither changes any rule or contract in this specification.
 
 Initial implementation target: **BA-001 / run_002** (`cases/runtime_fixture/runs/ba_001/run_002.md`).
 
