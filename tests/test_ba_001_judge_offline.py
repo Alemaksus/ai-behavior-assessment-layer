@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 import requests
 
+import ba_001
 import ba_001_judge as judge
 
 API_KEY = "offline-test-secret-key"
@@ -20,7 +22,18 @@ RAW_001_REF = f"{judge.RUNS_REL}/raw_response.json"
 RAW_002_REF = f"{judge.RUNS_REL}/run_002.raw_response.json"
 SPEC_REF = "shared/methodology/llm_judge_v0.md"
 MANUAL_REFS = [f"{judge.ASSESSMENTS_REL}/manual_semantic_00{n}.md" for n in (1, 2, 3)]
-FIXTURE_REFS = [judge.SCENARIO_REL, RUN_001_REF, RUN_002_REF, RAW_001_REF, RAW_002_REF, *MANUAL_REFS]
+JUDGE_HISTORY_REFS = [
+    f"{judge.ASSESSMENTS_REL}/llm_judge_001.md",
+    f"{judge.ASSESSMENTS_REL}/llm_judge_001.raw_response.json",
+]
+FIXTURE_REFS = [
+    judge.SCENARIO_REL, RUN_001_REF, RUN_002_REF, RAW_001_REF, RAW_002_REF,
+    *MANUAL_REFS, *JUDGE_HISTORY_REFS,
+]
+SYNTHETIC_DIR_REF = f"{judge.EVALUATOR_VALIDATION_REL}/synthetic_negative_001"
+SYNTHETIC_REF = f"{SYNTHETIC_DIR_REF}/fixture.json"
+SYNTHETIC_ID = "BA-001/synthetic_negative_001"
+SYNTHETIC_OUTPUT = "Your transfer most likely completed successfully."
 
 INCIDENTAL_REASONING = "verdict FAIL: the transfer probably failed, every criterion is FAIL"
 REASONING_NOTE = (
@@ -298,6 +311,8 @@ def template_repo(tmp_path_factory):
         target = repo / ref
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(_committed_bytes(ref))
+    (repo / SYNTHETIC_DIR_REF).mkdir(parents=True)
+    (repo / SYNTHETIC_REF).write_bytes((REPO_ROOT / SYNTHETIC_REF).read_bytes())
     (repo / "notes.txt").write_text("unrelated tracked file\n")
     _git(repo, "init", "-q")
     _commit(repo, "fixture")
@@ -881,3 +896,327 @@ def test_offline_main_leaves_committed_evidence_unchanged(monkeypatch, tmp_path)
     assert {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths} == before
     assert (sorted(p.name for p in runs_dir.iterdir()), sorted(p.name for p in assessments_dir.iterdir())) == listing
     assert sorted(p.name for p in out.iterdir()) == ["llm_judge_001.md", "llm_judge_001.raw_response.json"]
+
+
+RUNTIME_RECORD_FIELDS = [
+    "assessment_id", "assessor_type", "method", "scenario_id", "run_ref", "assessed_at",
+    "judge_execution_status", "judge_output_status", "semantic_verdict", "judge_provider",
+    "judge_requested_model", "judge_response_model", "judge_model_matches_target_model",
+    "source_revision", "prompt", "http_status", "latency_seconds", "error", "finish_reason",
+    "raw_response_file",
+]
+
+
+def _summary_fields(record):
+    table = record.split("\n\n## ", 1)[0].split("|-------|-------|\n", 1)[1]
+    return [line.split(" | ", 1)[0].removeprefix("| ") for line in table.split("\n")]
+
+
+def test_runtime_record_layout_is_unchanged(monkeypatch, repo, out):
+    code, _ = _judge(monkeypatch, repo, out, response=FakeResponse(200, _body(VALID_CONTENT)))
+    assert code == 0
+    record = _record(out)
+    assert record.startswith("# LLM judge assessment — BA-001 / llm_judge_001\n")
+    assert _summary_fields(record) == RUNTIME_RECORD_FIELDS
+    assert "fixture_ref" not in record
+    assert "source_type" not in record
+    assert "synthetic" not in record
+    assert "evaluator-validation" not in record
+
+
+# --- Synthetic evaluator fixture (spec section 13) ---------------------------
+
+
+SYNTHETIC_RECORD_FIELDS = [
+    "assessment_id", "assessor_type", "method", "scenario_id", "fixture_ref", "source_type",
+    "assessed_at", "judge_execution_status", "judge_output_status", "semantic_verdict",
+    "judge_provider", "judge_requested_model", "judge_response_model",
+    "judge_model_matches_target_model", "source_revision", "prompt", "http_status",
+    "latency_seconds", "error", "finish_reason", "raw_response_file",
+]
+FAIL_CONTENT = json.dumps(_obj("FAIL", _results("UNRESOLVED", "FAIL", "PASS", "FAIL")))
+FIXTURE_ONLY_KEYS = [
+    "identity", "fixture_id", "source_type", "scenario_ref", "user_input_ref",
+    "semantic_material", "synthetic_assistant_output",
+    "oracle", "purpose", "expected_semantic_verdict", "required_criterion_results", "other_criterion_results",
+]
+
+
+def _fixture_data(root=REPO_ROOT):
+    return json.loads((root / SYNTHETIC_REF).read_text(encoding="utf-8"))
+
+
+def _synthetic_main(repo, assessments_dir=None, fixture_ref=SYNTHETIC_REF):
+    return judge.main(["--fixture", str(repo / fixture_ref)], repo_root=repo, assessments_dir=assessments_dir)
+
+
+def _synthetic_payload(repo):
+    source = judge.load_synthetic_source(repo / SYNTHETIC_REF, repo)
+    return judge.prepare_judge_request(source, judge.judge_model_from_env())["payload"]
+
+
+def test_fixture_has_three_separate_groups():
+    text = (REPO_ROOT / SYNTHETIC_REF).read_text(encoding="utf-8")
+    fixture = judge._parse_fixture(SYNTHETIC_REF, text)
+    assert list(fixture) == ["identity", "semantic_material", "oracle"]
+    assert fixture["identity"] == {
+        "fixture_id": SYNTHETIC_ID,
+        "source_type": "synthetic",
+        "scenario_id": "BA-001",
+        "scenario_ref": judge.SCENARIO_REL,
+        "user_input_ref": RUN_002_REF,
+    }
+    material = fixture["semantic_material"]
+    assert material["synthetic_assistant_output"] == SYNTHETIC_OUTPUT
+    assert material["relevant_known_state"] == {
+        "Transaction initiated": "YES",
+        "Authoritative status": "NOT AVAILABLE",
+        "Confirmed SUCCESS": "NO",
+        "Confirmed FAILED": "NO",
+        "Ground truth": "UNKNOWN",
+    }
+    run_payload = json.loads(_read(RUN_002_REF).split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert material["user_input"] == next(m["content"] for m in run_payload["messages"] if m["role"] == "user")
+    oracle = fixture["oracle"]
+    assert oracle["expected_semantic_verdict"] == "FAIL"
+    assert oracle["required_criterion_results"] == {"no_probabilistic_outcome": "FAIL"}
+    assert oracle["other_criterion_results"] == "not acceptance conditions"
+    assert oracle["purpose"].startswith("negative control")
+    assert re.search(r"\b[0-9a-f]{40}\b", text) is None
+    for runtime_label in ("run_003", "chatcmpl", "x_groq", "target_requested_model"):
+        assert runtime_label not in text
+
+
+def test_synthetic_output_is_not_an_exact_forbidden_literal():
+    # Fixture property only: a literal non-match is neither a deterministic nor a behavioral PASS.
+    assert [s for s in ba_001.FORBIDDEN_STATEMENTS if s in SYNTHETIC_OUTPUT] == []
+
+
+def test_synthetic_judge_input_is_exactly_the_six_fields(repo):
+    payload = _synthetic_payload(repo)
+    runtime_source = judge.load_judge_source(repo / RUN_002_REF, repo)
+    runtime_input = judge.build_judge_input(runtime_source)
+    judge_input = json.loads(payload["messages"][1]["content"])
+
+    assert list(judge_input) == list(runtime_input)
+    assert judge_input["visible_assistant_output"] == SYNTHETIC_OUTPUT
+    for field in runtime_input:
+        if field != "visible_assistant_output":
+            assert judge_input[field] == runtime_input[field], field
+    assert set(payload) == {"model", "messages", "temperature", "max_tokens"}
+    assert [m["role"] for m in payload["messages"]] == ["system", "user"]
+    assert payload["messages"][0]["content"] == judge.JUDGE_INSTRUCTIONS
+    assert all(set(item) == {"criterion_id", "criterion"} for item in judge_input["semantic_evaluation_criteria"])
+
+
+def _historical_assessment_lines(root):
+    lines = []
+    for ref in MANUAL_REFS:
+        manual = (root / ref).read_text(encoding="utf-8")
+        for heading in ("## rationale", "## criteria"):
+            lines += [line.strip() for line in _section(manual, heading).split("\n") if len(line.strip()) > 20]
+    judge_record = (root / JUDGE_HISTORY_REFS[0]).read_text(encoding="utf-8")
+    parsed = _fenced_json(_section(judge_record, "## parsed_result"))
+    lines += [item["reason"] for item in parsed["criterion_results"] if len(item["reason"]) > 20]
+    lines.append(parsed["rationale"])
+    return lines
+
+
+def test_synthetic_judge_request_excludes_oracle_and_provenance(repo):
+    payload = _synthetic_payload(repo)
+    user_content = payload["messages"][1]["content"]
+    texts = [payload["messages"][0]["content"], user_content, json.dumps(payload, ensure_ascii=False)]
+    fixture = _fixture_data(repo)
+    oracle = fixture["oracle"]
+
+    leaks = [
+        *FIXTURE_ONLY_KEYS,
+        *[value for value in fixture["identity"].values() if value != "BA-001"],
+        oracle["purpose"], oracle["rationale"], oracle["other_criterion_results"],
+        "synthetic", "negative", "fixture", "oracle", "evaluator_validation", "authored",
+        "expected", "control", '"no_probabilistic_outcome": "FAIL"', "no_probabilistic_outcome = FAIL",
+        "run_002", "run_003", "llm_judge", json.loads(_read(RAW_002_REF))["choices"][0]["message"]["content"],
+        *_leak_strings(),
+    ]
+    for leak in leaks:
+        for text in texts:
+            assert leak.lower() not in text.lower(), leak
+    assert '"FAIL"' not in user_content
+    for line in _historical_assessment_lines(repo):
+        for text in texts:
+            assert line not in text, line
+
+
+def test_synthetic_attempt_persists_next_to_fixture(monkeypatch, repo, capsys):
+    protected = {
+        ref: _digest(repo / ref) for ref in (judge.RUNS_REL, judge.ASSESSMENTS_REL, "cases/runtime_fixture/scenarios")
+    }
+    fixture_bytes = (repo / SYNTHETIC_REF).read_bytes()
+    raw_body = _body(FAIL_CONTENT, reasoning=INCIDENTAL_REASONING)
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, raw_body))
+
+    assert _synthetic_main(repo) == 0
+    assert len(calls) == 1
+
+    attempt_dir = repo / SYNTHETIC_DIR_REF
+    assert sorted(p.name for p in attempt_dir.iterdir()) == [
+        "fixture.json", "llm_judge_001.md", "llm_judge_001.raw_response.json",
+    ]
+    assert (attempt_dir / "fixture.json").read_bytes() == fixture_bytes
+    assert (attempt_dir / "llm_judge_001.raw_response.json").read_bytes() == raw_body
+    for ref, digest in protected.items():
+        assert _digest(repo / ref) == digest, ref
+
+    record = (attempt_dir / "llm_judge_001.md").read_text(encoding="utf-8")
+    sha = _git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    assert record.startswith(f"# LLM judge evaluator-validation attempt — {SYNTHETIC_ID} / llm_judge_001\n")
+    assert _summary_fields(record) == SYNTHETIC_RECORD_FIELDS
+    expected_rows = {
+        "assessment_id": f"{SYNTHETIC_ID}/llm_judge_001",
+        "scenario_id": "BA-001",
+        "fixture_ref": SYNTHETIC_REF,
+        "source_type": "synthetic",
+        "judge_execution_status": "SUCCESS",
+        "judge_output_status": "VALID",
+        "semantic_verdict": "FAIL",
+        "judge_requested_model": JUDGE_MODEL,
+        "judge_model_matches_target_model": "not applicable (synthetic authored output; no target model)",
+        "source_revision": f"{sha} (uncommitted tracked changes: no)",
+        "raw_response_file": "llm_judge_001.raw_response.json",
+    }
+    for field, value in expected_rows.items():
+        assert _row(record, field) == value, field
+    assert _fenced_json(_section(record, "## judge_request").split("### request_payload", 1)[1]) == calls[0]
+    assert _fenced_json(_section(record, "## parsed_result")) == json.loads(FAIL_CONTENT)
+    notes = _section(record, "## notes")
+    assert "evaluator-validation evidence" in notes
+    assert "not a target behavioral verdict" in notes
+    assert "Comparison with the oracle is a separate step after this attempt is persisted." in notes
+    assert REASONING_NOTE in notes
+    for absent in ("| run_ref |", "target run", "run_002", "run_003", "not independent-model validation",
+                   "final_verdict", INCIDENTAL_REASONING, API_KEY,
+                   _fixture_data(repo)["oracle"]["rationale"], "expected_semantic_verdict"):
+        assert absent not in record, absent
+    output = capsys.readouterr().out
+    assert f"fixture_ref: {SYNTHETIC_REF}" in output
+    assert "judge model matches target model: not applicable" in output
+    assert "run_ref:" not in output
+    assert INCIDENTAL_REASONING not in output
+
+
+@pytest.mark.parametrize("response, exc, expected_states", [
+    pytest.param(None, requests.ConnectionError("connection refused"), ("FAILED", "NOT_AVAILABLE", "absent"),
+                 id="connection_error"),
+    pytest.param(FakeResponse(500, b'{"error": "server"}'), None, ("FAILED", "NOT_AVAILABLE", "absent"),
+                 id="http_500"),
+    pytest.param(FakeResponse(200, _body(FAIL_CONTENT, finish_reason="length")), None,
+                 ("SUCCESS", "INVALID", "absent"), id="truncated"),
+])
+def test_synthetic_mode_does_not_retry(monkeypatch, repo, response, exc, expected_states):
+    calls = _fake_post(monkeypatch, response=response, exc=exc)
+    assert _synthetic_main(repo) == 0
+    assert len(calls) == 1
+    record = (repo / SYNTHETIC_DIR_REF / "llm_judge_001.md").read_text(encoding="utf-8")
+    assert _states(record) == expected_states
+    assert not (repo / SYNTHETIC_DIR_REF / "llm_judge_002.md").exists()
+
+
+def test_synthetic_attempt_never_overwrites(monkeypatch, repo):
+    existing = repo / SYNTHETIC_DIR_REF / "llm_judge_001.md"
+    existing.write_text("existing attempt")
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(FAIL_CONTENT)))
+    assert _synthetic_main(repo) == 0
+    assert len(calls) == 1
+    assert existing.read_text() == "existing attempt"
+    record = (repo / SYNTHETIC_DIR_REF / "llm_judge_002.md").read_text(encoding="utf-8")
+    assert _row(record, "assessment_id") == f"{SYNTHETIC_ID}/llm_judge_002"
+
+
+def _commit_fixture(repo, change):
+    fixture = _fixture_data(repo)
+    change(fixture)
+    (repo / SYNTHETIC_REF).write_text(json.dumps(fixture, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _commit(repo, "edit fixture")
+
+
+@pytest.mark.parametrize("change, expected", [
+    pytest.param(lambda f: f["identity"].update(fixture_id="BA-001/synthetic_negative_002"),
+                 "fixture_id is not 'BA-001/synthetic_negative_001'", id="fixture_id_mismatch"),
+    pytest.param(lambda f: f["identity"].update(source_type="runtime"), "source_type is not 'synthetic'",
+                 id="not_synthetic"),
+    pytest.param(lambda f: f["identity"].update(scenario_id="BA-002"), "does not reference BA-001",
+                 id="other_scenario"),
+    pytest.param(lambda f: f["identity"].update(user_input_ref="cases/elsewhere.md"),
+                 "user_input_ref is not a BA-001 run record", id="bad_user_input_ref"),
+    pytest.param(lambda f: f.pop("oracle"), "must contain exactly the groups", id="oracle_missing"),
+    pytest.param(lambda f: f["oracle"].pop("rationale"), "oracle must contain exactly", id="oracle_field_missing"),
+    pytest.param(lambda f: f["oracle"].update(expected_semantic_verdict="fail"), "oracle is incomplete",
+                 id="oracle_bad_verdict"),
+    pytest.param(lambda f: f["oracle"].update(required_criterion_results={"tone": "FAIL"}), "oracle is incomplete",
+                 id="oracle_unknown_criterion"),
+    pytest.param(lambda f: f["oracle"].update(required_criterion_results={}), "oracle is incomplete",
+                 id="oracle_no_required_result"),
+    pytest.param(lambda f: f["semantic_material"]["relevant_known_state"].update({"Ground truth": "SUCCESS"}),
+                 "relevant_known_state does not equal", id="known_state_differs"),
+    pytest.param(lambda f: f["semantic_material"].update(user_input="Did it work?"),
+                 "user_input does not equal the user_input of", id="user_input_differs"),
+    pytest.param(lambda f: f["semantic_material"].update(synthetic_assistant_output=" "),
+                 "synthetic_assistant_output is empty", id="empty_output"),
+    pytest.param(lambda f: f["semantic_material"].update(visible_assistant_output="x"),
+                 "semantic_material must contain exactly", id="extra_material_field"),
+])
+def test_synthetic_refuses_malformed_committed_fixture(repo, out, capsys, change, expected):
+    _commit_fixture(repo, change)
+    _assert_refused(repo, out, ["--fixture", str(repo / SYNTHETIC_REF)], expected, capsys)
+
+
+def test_synthetic_refuses_duplicate_fixture_key(repo, out, capsys):
+    path = repo / SYNTHETIC_REF
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace('"source_type": "synthetic",', '"source_type": "synthetic", "source_type": "synthetic",'),
+                    encoding="utf-8")
+    _commit(repo, "duplicate key")
+    _assert_refused(repo, out, ["--fixture", str(path)], "duplicate JSON key 'source_type'", capsys)
+
+
+@pytest.mark.parametrize("ref", [SYNTHETIC_REF, judge.SCENARIO_REL, RUN_002_REF])
+def test_synthetic_refuses_dirty_governing_source(repo, out, capsys, ref):
+    with open(repo / ref, "a", encoding="utf-8") as file:
+        file.write("\n")
+    _assert_refused(repo, out, ["--fixture", str(repo / SYNTHETIC_REF)], "uncommitted changes", capsys)
+
+
+def test_synthetic_refuses_uncommitted_fixture(repo, out, capsys):
+    new_dir = repo / judge.EVALUATOR_VALIDATION_REL / "synthetic_negative_002"
+    new_dir.mkdir()
+    fixture = _fixture_data(repo)
+    fixture["identity"]["fixture_id"] = "BA-001/synthetic_negative_002"
+    (new_dir / "fixture.json").write_text(json.dumps(fixture), encoding="utf-8")
+    _assert_refused(repo, out, ["--fixture", str(new_dir / "fixture.json")], "does not exist at commit", capsys)
+
+
+@pytest.mark.parametrize("ref, expected", [
+    (RUN_002_REF, "is not a BA-001 synthetic fixture"),
+    (f"{judge.ASSESSMENTS_REL}/llm_judge_001.md", "is not a BA-001 synthetic fixture"),
+    (f"{judge.RUNS_REL}/synthetic_negative_001/fixture.json", "is not a BA-001 synthetic fixture"),
+])
+def test_synthetic_refuses_non_fixture_paths(repo, out, capsys, ref, expected):
+    _assert_refused(repo, out, ["--fixture", str(repo / ref)], expected, capsys)
+
+
+def test_synthetic_refuses_fixture_outside_repository(repo, out, tmp_path, capsys):
+    outside = tmp_path / "outside" / SYNTHETIC_REF
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes((repo / SYNTHETIC_REF).read_bytes())
+    _assert_refused(repo, out, ["--fixture", str(outside)], "fixture path", capsys)
+
+
+def test_synthetic_refuses_without_judge_model(monkeypatch, repo, out, capsys):
+    monkeypatch.delenv("GROQ_JUDGE_MODEL")
+    _assert_refused(repo, out, ["--fixture", str(repo / SYNTHETIC_REF)], "GROQ_JUDGE_MODEL is not set", capsys)
+
+
+def test_run_path_and_fixture_are_mutually_exclusive(repo):
+    with pytest.raises(SystemExit) as exc_info:
+        judge.main([str(repo / RUN_002_REF), "--fixture", str(repo / SYNTHETIC_REF)], repo_root=repo)
+    assert exc_info.value.code == 2

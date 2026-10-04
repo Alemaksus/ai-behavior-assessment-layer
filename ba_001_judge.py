@@ -3,6 +3,10 @@
 Runs one judge attempt on one committed BA-001 run record and persists it:
 `python ba_001_judge.py cases/runtime_fixture/runs/ba_001/run_002.md`
 from the repository root. Requires GROQ_JUDGE_MODEL and GROQ_API_KEY.
+
+Synthetic evaluator validation (spec section 13) runs on one committed fixture
+instead, persisting the attempt next to it:
+`python ba_001_judge.py --fixture evaluator_validation/ba_001/synthetic_negative_001/fixture.json`
 """
 
 import argparse
@@ -25,6 +29,7 @@ SCENARIO_ID = "BA-001"
 SCENARIO_REL = "cases/runtime_fixture/scenarios/ba_001_unknown_transaction_status.md"
 RUNS_REL = "cases/runtime_fixture/runs/ba_001"
 ASSESSMENTS_REL = "cases/runtime_fixture/assessments/ba_001"
+EVALUATOR_VALIDATION_REL = "evaluator_validation/ba_001"
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -52,6 +57,14 @@ CRITERION_IDS = tuple(criterion_id for criterion_id, _ in CRITERIA)
 VERDICTS = ("PASS", "FAIL", "UNRESOLVED")
 TOP_LEVEL_KEYS = ("verdict", "criterion_results", "rationale")
 CRITERION_KEYS = ("criterion_id", "result", "reason")
+FIXTURE_GROUPS = {
+    "identity": ("fixture_id", "source_type", "scenario_id", "scenario_ref", "user_input_ref"),
+    "semantic_material": ("relevant_known_state", "user_input", "synthetic_assistant_output"),
+    "oracle": (
+        "purpose", "expected_semantic_verdict", "required_criterion_results",
+        "other_criterion_results", "rationale",
+    ),
+}
 
 JUDGE_PROVIDER = "groq"
 JUDGE_MODEL_ENV = "GROQ_JUDGE_MODEL"
@@ -100,6 +113,7 @@ Response rules:
 _INVALID_JSON = object()
 _ATTEMPT_ARTIFACT_NAME = re.compile(r"^llm_judge_(\d+)(?:\.|$)")
 _RUN_REF = re.compile(re.escape(RUNS_REL) + r"/run_\d{3,}\.md")
+_FIXTURE_REF = re.compile(re.escape(EVALUATOR_VALIDATION_REL) + r"/(synthetic_[a-z]+_\d{3})/fixture\.json")
 _SCENARIO_H1 = re.compile(r"# (\S+) — .+")
 _CELL_SEPARATOR = re.compile(r"(?<!\\)\|")
 
@@ -138,17 +152,31 @@ def _read_committed(repo_root, sha, path):
         raise PreconditionError(f"{path} at commit {sha} is not valid UTF-8") from exc
 
 
-def _run_ref(run_path, repo_root):
-    resolved = Path(run_path).resolve()
+def _repo_ref(path, repo_root, label):
+    resolved = Path(path).resolve()
     try:
-        ref = resolved.relative_to(repo_root).as_posix()
+        return resolved.relative_to(repo_root).as_posix()
     except ValueError:
         raise PreconditionError(
-            f"run path {str(run_path)!r} is outside the repository {repo_root}"
+            f"{label} {str(path)!r} is outside the repository {repo_root}"
         ) from None
+
+
+def _run_ref(run_path, repo_root):
+    ref = _repo_ref(run_path, repo_root, "run path")
     if not _RUN_REF.fullmatch(ref):
         raise PreconditionError(
             f"{ref!r} is not a BA-001 run record (expected {RUNS_REL}/run_NNN.md)"
+        )
+    return ref
+
+
+def _fixture_ref(fixture_path, repo_root):
+    ref = _repo_ref(fixture_path, repo_root, "fixture path")
+    if not _FIXTURE_REF.fullmatch(ref):
+        raise PreconditionError(
+            f"{ref!r} is not a BA-001 synthetic fixture "
+            f"(expected {EVALUATOR_VALIDATION_REL}/synthetic_<name>_NNN/fixture.json)"
         )
     return ref
 
@@ -271,20 +299,41 @@ def _raw_visible_content(raw_ref, raw_text):
     return content
 
 
-def load_judge_source(run_path, repo_root=REPO_ROOT):
-    repo_root = Path(repo_root).resolve()
-    run_ref = _run_ref(run_path, repo_root)
-
+def _head_revision(repo_root):
     toplevel = _git(
         repo_root, "rev-parse", "--show-toplevel",
         failure=f"{repo_root} is not a git repository",
     ).decode("utf-8").strip()
     if Path(toplevel).resolve() != repo_root:
         raise PreconditionError(f"{repo_root} is not the top level of its git repository")
-    sha = _git(
+    return _git(
         repo_root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}",
         failure="HEAD does not resolve to a commit",
     ).decode("utf-8").strip()
+
+
+def _require_clean(repo_root, paths):
+    dirty = _git(
+        repo_root, "status", "--porcelain", "--untracked-files=all", "--", *paths,
+        failure="git status failed",
+    ).decode("utf-8", errors="replace").strip()
+    if dirty:
+        raise PreconditionError(
+            f"judge input files have uncommitted changes: {dirty.replace(chr(10), '; ')}"
+        )
+
+
+def _has_tracked_changes(repo_root):
+    return bool(_git(
+        repo_root, "status", "--porcelain", "--untracked-files=no",
+        failure="git status failed",
+    ).strip())
+
+
+def load_judge_source(run_path, repo_root=REPO_ROOT):
+    repo_root = Path(repo_root).resolve()
+    run_ref = _run_ref(run_path, repo_root)
+    sha = _head_revision(repo_root)
 
     run_lines = _read_committed(repo_root, sha, run_ref).split("\n")
     header = _section_table(run_lines, 0) if run_lines[0].startswith("# ") else None
@@ -304,15 +353,7 @@ def load_judge_source(run_path, repo_root=REPO_ROOT):
         )
     raw_ref = f"{RUNS_REL}/{raw_name}"
 
-    dirty = _git(
-        repo_root, "status", "--porcelain", "--untracked-files=all", "--",
-        SCENARIO_REL, run_ref, raw_ref,
-        failure="git status failed",
-    ).decode("utf-8", errors="replace").strip()
-    if dirty:
-        raise PreconditionError(
-            f"judge input files have uncommitted changes: {dirty.replace(chr(10), '; ')}"
-        )
+    _require_clean(repo_root, [SCENARIO_REL, run_ref, raw_ref])
 
     scenario = _parse_scenario(_read_committed(repo_root, sha, SCENARIO_REL))
     if scenario["scenario_id"] != header["scenario_id"]:
@@ -340,22 +381,103 @@ def load_judge_source(run_path, repo_root=REPO_ROOT):
             f"{run_ref} visible_assistant_content does not equal message.content in {raw_ref}"
         )
 
-    tracked_changes = _git(
-        repo_root, "status", "--porcelain", "--untracked-files=no",
-        failure="git status failed",
-    ).strip()
-
     return {
         "run_ref": run_ref,
         "raw_ref": raw_ref,
         "source_revision": sha,
-        "uncommitted_tracked_changes": bool(tracked_changes),
+        "uncommitted_tracked_changes": _has_tracked_changes(repo_root),
         "target_requested_model": target_model,
         "scenario_id": scenario["scenario_id"],
         "behavioral_claim": scenario["behavioral_claim"],
         "relevant_known_state": scenario["relevant_known_state"],
         "user_input": user_input,
         "visible_assistant_output": visible_output,
+    }
+
+
+def _parse_fixture(fixture_ref, text):
+    try:
+        fixture = json.loads(
+            text, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant
+        )
+    except (ValueError, RecursionError) as exc:
+        raise PreconditionError(f"{fixture_ref} is not strict JSON: {exc}") from None
+    if not isinstance(fixture, dict) or set(fixture) != set(FIXTURE_GROUPS):
+        raise PreconditionError(
+            f"{fixture_ref} must contain exactly the groups {', '.join(FIXTURE_GROUPS)}"
+        )
+    for group, keys in FIXTURE_GROUPS.items():
+        if not isinstance(fixture[group], dict) or set(fixture[group]) != set(keys):
+            raise PreconditionError(f"{fixture_ref} {group} must contain exactly: {', '.join(keys)}")
+    return fixture
+
+
+def _check_oracle(fixture_ref, oracle):
+    required = oracle["required_criterion_results"]
+    if not (
+        _is_verdict(oracle["expected_semantic_verdict"])
+        and isinstance(required, dict) and required
+        and all(key in CRITERION_IDS and _is_verdict(value) for key, value in required.items())
+        and all(
+            isinstance(oracle[key], str) and oracle[key].strip()
+            for key in ("purpose", "other_criterion_results", "rationale")
+        )
+    ):
+        raise PreconditionError(f"{fixture_ref} oracle is incomplete or malformed")
+
+
+def load_synthetic_source(fixture_path, repo_root=REPO_ROOT):
+    # The oracle is checked to be present and well formed but is not returned,
+    # so it cannot reach the judge request.
+    repo_root = Path(repo_root).resolve()
+    fixture_ref = _fixture_ref(fixture_path, repo_root)
+    sha = _head_revision(repo_root)
+
+    fixture = _parse_fixture(fixture_ref, _read_committed(repo_root, sha, fixture_ref))
+    identity = fixture["identity"]
+    material = fixture["semantic_material"]
+    expected_id = f"{SCENARIO_ID}/{_FIXTURE_REF.fullmatch(fixture_ref).group(1)}"
+    if identity["fixture_id"] != expected_id:
+        raise PreconditionError(f"{fixture_ref} fixture_id is not {expected_id!r}")
+    if identity["source_type"] != "synthetic":
+        raise PreconditionError(f"{fixture_ref} source_type is not 'synthetic'")
+    if identity["scenario_id"] != SCENARIO_ID or identity["scenario_ref"] != SCENARIO_REL:
+        raise PreconditionError(f"{fixture_ref} does not reference {SCENARIO_ID} at {SCENARIO_REL}")
+    user_input_ref = identity["user_input_ref"]
+    if not isinstance(user_input_ref, str) or not _RUN_REF.fullmatch(user_input_ref):
+        raise PreconditionError(f"{fixture_ref} user_input_ref is not a BA-001 run record")
+
+    _require_clean(repo_root, [fixture_ref, SCENARIO_REL, user_input_ref])
+
+    scenario = _parse_scenario(_read_committed(repo_root, sha, SCENARIO_REL))
+    known_state = material["relevant_known_state"]
+    if not isinstance(known_state, dict) or (
+        list(known_state.items()) != list(scenario["relevant_known_state"].items())
+    ):
+        raise PreconditionError(
+            f"{fixture_ref} relevant_known_state does not equal the scenario's Known runtime state"
+        )
+    run_lines = _read_committed(repo_root, sha, user_input_ref).split("\n")
+    run_user_input = _fenced_block(run_lines, "## user_input")
+    if run_user_input is None or material["user_input"] != run_user_input:
+        raise PreconditionError(
+            f"{fixture_ref} user_input does not equal the user_input of {user_input_ref}"
+        )
+    synthetic_output = material["synthetic_assistant_output"]
+    if not isinstance(synthetic_output, str) or not synthetic_output.strip():
+        raise PreconditionError(f"{fixture_ref} synthetic_assistant_output is empty or not a string")
+    _check_oracle(fixture_ref, fixture["oracle"])
+
+    return {
+        "fixture_ref": fixture_ref,
+        "fixture_id": identity["fixture_id"],
+        "source_revision": sha,
+        "uncommitted_tracked_changes": _has_tracked_changes(repo_root),
+        "scenario_id": scenario["scenario_id"],
+        "behavioral_claim": scenario["behavioral_claim"],
+        "relevant_known_state": scenario["relevant_known_state"],
+        "user_input": material["user_input"],
+        "visible_assistant_output": synthetic_output,
     }
 
 
@@ -641,23 +763,64 @@ def _available(value):
     return "not available" if value is None else value
 
 
+def _is_synthetic(source):
+    return "fixture_ref" in source
+
+
 def _models_match(source, execution):
     return execution["request"]["payload"]["model"] == source["target_requested_model"]
+
+
+def _model_match_text(source, execution):
+    if _is_synthetic(source):
+        return "not applicable (synthetic authored output; no target model)"
+    return (
+        f"{'yes' if _models_match(source, execution) else 'no'} "
+        f"(target run requested model: {source['target_requested_model']})"
+    )
+
+
+def _synthetic_notes():
+    return [
+        "- This is evaluator-validation evidence for the synthetic fixture referenced by "
+        "fixture_ref. The fixture is authored output, not runtime evidence, and this result is "
+        "not a target behavioral verdict. It does not modify the fixture, any run record, or "
+        "any existing assessment.",
+        "- Judge input was limited to six fields extracted from committed files at "
+        "source_revision: scenario_id, behavioral_claim, relevant_known_state, user_input, "
+        "visible_assistant_output, semantic_evaluation_criteria. visible_assistant_output is "
+        "the fixture's synthetic assistant output. The judge input files were verified to have "
+        "no uncommitted changes.",
+        "- Synthetic provenance and the fixture's predeclared oracle were not part of the judge "
+        "request. Comparison with the oracle is a separate step after this attempt is persisted.",
+        "- There is no target execution for synthetic authored output, so target/judge model "
+        "matching is not applicable.",
+        "- Incidental judge reasoning, if present in the raw response, was not used as "
+        "assessment evidence.",
+        "- There is no automatic retry. semantic_verdict is recorded only when "
+        "judge_output_status is VALID; execution failures and invalid outputs are never "
+        "converted into UNRESOLVED.",
+    ]
 
 
 def render_attempt_record(attempt_id, source, execution, states, raw_filename):
     request = execution["request"]
     payload = request["payload"]
     metadata = response_metadata(execution["raw_body"])
-    models_match = _models_match(source, execution)
+    synthetic = _is_synthetic(source)
     output_status = states["judge_output_status"]
+    attempt_scope = source["fixture_id"] if synthetic else SCENARIO_ID
+    source_rows = (
+        [("fixture_ref", source["fixture_ref"]), ("source_type", "synthetic")]
+        if synthetic else [("run_ref", source["run_ref"])]
+    )
 
     summary = [
-        ("assessment_id", f"{SCENARIO_ID}/{attempt_id}"),
+        ("assessment_id", f"{attempt_scope}/{attempt_id}"),
         ("assessor_type", "llm"),
         ("method", "llm_judge"),
         ("scenario_id", SCENARIO_ID),
-        ("run_ref", source["run_ref"]),
+        *source_rows,
         ("assessed_at", execution["assessed_at"]),
         ("judge_execution_status", execution["execution_status"]),
         ("judge_output_status", output_status),
@@ -665,9 +828,7 @@ def render_attempt_record(attempt_id, source, execution, states, raw_filename):
         ("judge_provider", JUDGE_PROVIDER),
         ("judge_requested_model", payload["model"]),
         ("judge_response_model", _available(metadata["model"])),
-        ("judge_model_matches_target_model",
-         f"{'yes' if models_match else 'no'} "
-         f"(target run requested model: {source['target_requested_model']})"),
+        ("judge_model_matches_target_model", _model_match_text(source, execution)),
         ("source_revision",
          f"{source['source_revision']} (uncommitted tracked changes: "
          f"{'yes' if source['uncommitted_tracked_changes'] else 'no'})"),
@@ -706,33 +867,38 @@ def render_attempt_record(attempt_id, source, execution, states, raw_filename):
         else f"not recorded (judge_output_status: {output_status})"
     )
 
-    notes = [
-        "- This is an independent LLM judge evaluation signal for the referenced run, not a "
-        "final behavioral verdict. It does not modify the target run record or any existing "
-        "assessment.",
-        "- Judge input was limited to six fields extracted from committed files at "
-        "source_revision: scenario_id, behavioral_claim, relevant_known_state, user_input, "
-        "visible_assistant_output, semantic_evaluation_criteria. The judge input files were "
-        "verified to have no uncommitted changes.",
-        "- The target run's `message.reasoning` was excluded from judge input. The target raw "
-        "response file was read only to check that visible_assistant_output equals its "
-        "`message.content`.",
-        "- Incidental judge reasoning, if present in the raw response, was not used as "
-        "assessment evidence.",
-    ]
-    if models_match:
+    if synthetic:
+        title = f"# LLM judge evaluator-validation attempt — {attempt_scope} / {attempt_id}"
+        notes = _synthetic_notes()
+    else:
+        title = f"# LLM judge assessment — {SCENARIO_ID} / {attempt_id}"
+        notes = [
+            "- This is an independent LLM judge evaluation signal for the referenced run, not a "
+            "final behavioral verdict. It does not modify the target run record or any existing "
+            "assessment.",
+            "- Judge input was limited to six fields extracted from committed files at "
+            "source_revision: scenario_id, behavioral_claim, relevant_known_state, user_input, "
+            "visible_assistant_output, semantic_evaluation_criteria. The judge input files were "
+            "verified to have no uncommitted changes.",
+            "- The target run's `message.reasoning` was excluded from judge input. The target raw "
+            "response file was read only to check that visible_assistant_output equals its "
+            "`message.content`.",
+            "- Incidental judge reasoning, if present in the raw response, was not used as "
+            "assessment evidence.",
+        ]
+        if _models_match(source, execution):
+            notes.append(
+                "- The judge model is the same as the target run's requested model; this result "
+                "is not independent-model validation."
+            )
         notes.append(
-            "- The judge model is the same as the target run's requested model; this result is "
-            "not independent-model validation."
+            "- There is no automatic retry. semantic_verdict is recorded only when "
+            "judge_output_status is VALID; execution failures and invalid outputs are never "
+            "converted into UNRESOLVED."
         )
-    notes.append(
-        "- There is no automatic retry. semantic_verdict is recorded only when "
-        "judge_output_status is VALID; execution failures and invalid outputs are never "
-        "converted into UNRESOLVED."
-    )
 
     sections = [
-        f"# LLM judge assessment — {SCENARIO_ID} / {attempt_id}",
+        title,
         table(summary),
         "## judge_request",
         table(request_fields),
@@ -775,12 +941,19 @@ def write_attempt(assessments_dir, attempt_id, record, raw_filename, raw_body):
 
 def print_report(source, execution, states):
     metadata = response_metadata(execution["raw_body"])
+    synthetic = _is_synthetic(source)
     print(f"scenario_id: {SCENARIO_ID}")
-    print(f"run_ref: {source['run_ref']}")
+    if synthetic:
+        print(f"fixture_ref: {source['fixture_ref']}")
+    else:
+        print(f"run_ref: {source['run_ref']}")
     print(f"assessed_at: {execution['assessed_at']}")
     print(f"judge requested model: {execution['request']['payload']['model']}")
     print(f"judge response model: {metadata['model']}")
-    print(f"judge model matches target model: {'yes' if _models_match(source, execution) else 'no'}")
+    if synthetic:
+        print("judge model matches target model: not applicable")
+    else:
+        print(f"judge model matches target model: {'yes' if _models_match(source, execution) else 'no'}")
     print(f"judge execution status: {execution['execution_status']}")
     print(f"http status: {execution['http_status']}")
     print(f"error: {execution['error']}")
@@ -793,23 +966,34 @@ def print_report(source, execution, states):
 
 def _parse_args(argv):
     parser = argparse.ArgumentParser(
-        description=f"Run LLM Judge v0 once on one committed {SCENARIO_ID} run record."
+        description=f"Run LLM Judge v0 once on one committed {SCENARIO_ID} run record "
+                    "or synthetic evaluator fixture."
     )
-    parser.add_argument("run_path", help=f"for example {RUNS_REL}/run_002.md")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("run_path", nargs="?", help=f"for example {RUNS_REL}/run_002.md")
+    target.add_argument(
+        "--fixture",
+        help=f"for example {EVALUATOR_VALIDATION_REL}/synthetic_negative_001/fixture.json",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv=None, *, repo_root=REPO_ROOT, assessments_dir=None):
     args = _parse_args(argv)
     repo_root = Path(repo_root).resolve()
-    assessments_dir = (
-        Path(assessments_dir) if assessments_dir is not None else repo_root / ASSESSMENTS_REL
-    )
 
     try:
+        if args.fixture is not None:
+            default_dir = repo_root / _fixture_ref(args.fixture, repo_root).rsplit("/", 1)[0]
+        else:
+            default_dir = repo_root / ASSESSMENTS_REL
+        assessments_dir = Path(assessments_dir) if assessments_dir is not None else default_dir
         if not assessments_dir.is_dir():
             raise PreconditionError(f"assessments directory {assessments_dir} does not exist")
-        source = load_judge_source(args.run_path, repo_root)
+        if args.fixture is not None:
+            source = load_synthetic_source(args.fixture, repo_root)
+        else:
+            source = load_judge_source(args.run_path, repo_root)
         judge_model = judge_model_from_env()
     except PreconditionError as exc:
         print(f"Refused: {exc}", file=sys.stderr)
@@ -847,7 +1031,10 @@ def main(argv=None, *, repo_root=REPO_ROOT, assessments_dir=None):
     print(f"\nPersisted {SCENARIO_ID} judge attempt record: {md_path}")
     if raw_filename is not None:
         print(f"Raw response: {assessments_dir / raw_filename}")
-    print("This is an independent judge signal, not a final behavioral verdict.")
+    if _is_synthetic(source):
+        print("This is evaluator-validation evidence, not a target behavioral verdict.")
+    else:
+        print("This is an independent judge signal, not a final behavioral verdict.")
     if cleanup_error is not None:
         print(
             f"\nWARNING: the judge attempt record {md_path} is complete and persisted, but "

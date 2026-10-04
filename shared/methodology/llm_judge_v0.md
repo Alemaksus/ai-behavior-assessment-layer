@@ -240,3 +240,15 @@ Evidence before architecture.
 **LLM-as-a-judge is an evaluation signal, not a source of truth.**
 
 The strength of any downstream AIRRA conclusion must not exceed the strength and provenance of the available evaluation evidence.
+
+## 13. Synthetic evaluator-validation fixtures
+
+A synthetic evaluator fixture is an authored assistant output used to check the judge itself. It is **not runtime evidence**: it is never a run, a target execution, or a provider response, and it never supports a behavioral verdict about the target system.
+
+- The fixture and its predeclared oracle (expected verdict and required criterion results) are committed before any live judge attempt on it. Section 2.4 applies to the fixture and to the committed sources it references.
+- The judge receives only the six fields of section 2.1. `visible_assistant_output` is the fixture's synthetic assistant output; `relevant_known_state` and `user_input` are the fixture's, and must equal their committed sources: the scenario's known runtime state, and the `user_input` of a committed run of the scenario referenced by the fixture. Synthetic provenance (fixture identity, path, source type, purpose) and the oracle never enter the judge request. Judge instructions and criteria are unchanged.
+- A synthetic attempt records `fixture_ref` (exact path of the committed fixture) in place of `run_ref` (sections 8 and 9). There is no target execution, so target/judge model matching (section 2.5) is recorded as not applicable.
+- A synthetic attempt produces evaluator-validation evidence, not a target behavioral verdict.
+- Comparison with the oracle happens only after the judge attempt is persisted, as a separate later step.
+- All other rules apply unchanged, including output validation (section 5), execution/output/verdict states (section 6), incidental judge reasoning and persistence (section 8), and no retry (section 10).
+- Suggested location: `evaluator_validation/<scenario>/<fixture>/fixture.json`, with attempts persisted alongside as `llm_judge_NNN.md` and `llm_judge_NNN.raw_response.json`.
