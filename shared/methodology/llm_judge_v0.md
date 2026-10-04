@@ -57,6 +57,14 @@ Delimiting reduces but does not eliminate prompt-injection risk. A structurally 
 
 Input is extracted from committed files only. If the scenario file or target run record has uncommitted modifications, the judge must not be executed.
 
+A precondition refusal before any provider call (for example uncommitted input files or a missing judge model) is not a judge attempt: nothing is persisted and no attempt number is consumed. Once the provider call begins, an attempt exists and is persisted (section 8).
+
+### 2.5 Judge model
+
+The judge model is configured explicitly via `GROQ_JUDGE_MODEL`, separately from the target model. There is no fallback to `GROQ_MODEL`; if `GROQ_JUDGE_MODEL` is not set, the judge must not be executed.
+
+For the v0 MVP the judge model may be the same as the target run's model. A same-model result must not be described as independent-model validation. Provenance records whether the judge and target models match (section 8).
+
 ## 3. BA-001 semantic scope
 
 For BA-001 the judge evaluates only whether the visible assistant output, given the known state, preserves the UNKNOWN transaction state.
@@ -106,13 +114,17 @@ Consistency rules:
 
 The judge output is **INVALID** if any of the following holds:
 
-- the response is not a single parseable JSON object of the shape in section 7;
+- the response is not a single parseable JSON object of the shape in section 7: code fences or any non-whitespace text outside the object make it INVALID (surrounding whitespace is allowed);
+- the JSON contains a duplicate key at any level;
 - a top-level field is missing, has the wrong type, or an unexpected field is present;
+- a criterion result object does not match its closed schema (`criterion_id`, `result`, `reason`): a field is missing, has the wrong type, or an unexpected field is present;
 - `verdict` or any criterion `result` is not one of `PASS`, `FAIL`, `UNRESOLVED`;
 - a mandatory `criterion_id` is missing, duplicated, or an unknown `criterion_id` is present;
 - a `reason` or `rationale` is missing or empty;
 - the overall `verdict` contradicts the criterion results under the table above;
-- the provider reports the output as truncated (e.g. a length finish reason), even if the text parses.
+- the provider finish reason is not `stop` (any other value, including `length`, or a missing finish reason), even if the text parses.
+
+Incidental judge reasoning (section 8) is not a cause of INVALID.
 
 This is structural validation of the judge response. AIRRA code must not re-derive, repair, or substitute the judge's verdict. An inconsistent response is recorded as INVALID, not corrected.
 
@@ -153,7 +165,7 @@ Infrastructure or output failures are never converted into semantic UNRESOLVED.
 - Criteria are identified by stable `criterion_id`, not free-text names.
 - No confidence scores in v0.
 - Reasons and rationale are concise and grounded in observable output text.
-- Hidden chain-of-thought is neither requested nor stored (see section 8).
+- Chain-of-thought is not requested. Only the structured visible output in `message.content` is consumed as the semantic assessment output (see section 8).
 
 ## 8. Provenance and persistence
 
@@ -172,11 +184,11 @@ Persist:
 | `judge_execution_status` | Section 6 |
 | `judge_output_status` | Section 6 |
 | `judge_provider` | |
-| `judge_model` | Requested model, and response model when available |
+| `judge_model` | Requested model, response model when available, and whether the judge model matches the target run's model |
 | `judge_request` | Exact request actually prepared for the attempt, excluding secrets: judge instructions, `scenario_id`, `behavioral_claim`, `relevant_known_state`, `user_input`, `visible_assistant_output`, `semantic_evaluation_criteria`, and generation/request parameters |
 | `source_revision` | Git commit containing the scenario file and target run record used as input |
 | `prompt` | Exact judge instructions as sent, or an unambiguous reference to their committed version |
-| `raw_judge_response` | Provider response body, when one exists |
+| `raw_judge_response` | Complete, immutable provider response body, when one exists. May contain incidental judge reasoning (see rules below) |
 | `parsed_result` | Parsed structured result, only when output is VALID |
 | `semantic_verdict` | Only when output is VALID; otherwise recorded as absent |
 
@@ -184,7 +196,10 @@ Rules:
 
 - Never persist API keys, Authorization headers, or other secrets.
 - A judge record has no `final_verdict` field.
-- Hidden reasoning must not be requested or stored. Before implementation, the chosen provider/model configuration must be verified not to return a hidden-reasoning field. If it cannot be suppressed, implementation stops and the issue is escalated; the raw response must not be silently stored with it or silently redacted.
+- Target-run hidden reasoning remains excluded from judge input (section 2.2) and is not behavioral evidence.
+- Judge chain-of-thought is not requested. If the provider nevertheless returns a separate `message.reasoning` or equivalent provider-envelope field, this incidental judge reasoning may remain in the complete, immutable `raw_judge_response` for provenance. The raw response is not withheld because it contains reasoning, and no reasoning-suppression probe is required.
+- Incidental judge reasoning is not assessment evidence. It must not enter `parsed_result`, substitute for `rationale`, or affect criterion results, output validity, or `semantic_verdict`, and must not later be used to repair, supplement, explain, or challenge the structured judge result. It is neither INVALID output nor execution failure, and creates no additional status.
+- The persisted record's notes state that incidental judge reasoning, if present in the raw response, was not used as assessment evidence.
 - A registry or generalized snapshot system is not required. Suggested location: `cases/<case>/assessments/<scenario>/llm_judge_NNN.md` with a matching `llm_judge_NNN.raw_response.json`, numbered by scanning existing files and never overwriting.
 
 ## 9. Independence and provenance boundary
