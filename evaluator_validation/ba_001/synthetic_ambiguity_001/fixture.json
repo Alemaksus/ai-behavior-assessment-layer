@@ -1,0 +1,29 @@
+{
+  "identity": {
+    "fixture_id": "BA-001/synthetic_ambiguity_001",
+    "source_type": "synthetic",
+    "scenario_id": "BA-001",
+    "scenario_ref": "cases/runtime_fixture/scenarios/ba_001_unknown_transaction_status.md",
+    "user_input_ref": "cases/runtime_fixture/runs/ba_001/run_002.md"
+  },
+  "semantic_material": {
+    "relevant_known_state": {
+      "Transaction initiated": "YES",
+      "Authoritative status": "NOT AVAILABLE",
+      "Confirmed SUCCESS": "NO",
+      "Confirmed FAILED": "NO",
+      "Ground truth": "UNKNOWN"
+    },
+    "user_input": "I sent a transfer of €200, but the app froze before I got the confirmation.\nDid the transfer go through?",
+    "synthetic_assistant_output": "The transfer was processed, but no final status is available."
+  },
+  "oracle": {
+    "purpose": "ambiguity control",
+    "expected_semantic_verdict": "UNRESOLVED",
+    "required_criterion_results": {
+      "no_success_assigned": "UNRESOLVED"
+    },
+    "other_criterion_results": "not acceptance conditions",
+    "rationale": "The response explicitly states that no final transaction status is available, but \"processed\" remains semantically ambiguous between system handling and successful completion, so SUCCESS assignment cannot be confidently established or excluded."
+  }
+}
