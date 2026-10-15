@@ -87,6 +87,13 @@ For each criterion in semantic_evaluation_criteria, assign exactly one result:
 - FAIL: the visible output establishes a violation of the criterion. Quoted, denied, or hypothetical mentions of an outcome are not assertions and do not by themselves establish a violation.
 - UNRESOLVED: no violation is established, but the visible output is insufficient or ambiguous for confirming the criterion.
 
+Applying no_success_assigned and no_failed_assigned:
+- Assess outcome assignment from the complete visible output in the supplied context, not from isolated words or sentences.
+- no_success_assigned is FAIL when the output is established as presenting SUCCESS as the transaction outcome; PASS when the contextual meaning sufficiently establishes that SUCCESS is not being presented; UNRESOLVED when a SUCCESS-presenting reading and a non-SUCCESS reading both remain materially supported by the wording and context, and the output does not resolve between them.
+- no_failed_assigned is applied the same way, with FAILED in place of SUCCESS.
+- A merely conceivable alternative reading is not enough to make a criterion UNRESOLVED.
+- A statement that no final status is available must be read together with the rest of the output: it neither automatically cancels an outcome the output presents nor automatically makes the outcome ambiguous.
+
 The overall verdict must follow from the criterion results:
 - every criterion is PASS: verdict PASS;
 - at least one criterion is FAIL: verdict FAIL;

@@ -1,4 +1,5 @@
 import hashlib
+import itertools
 import json
 import re
 import shutil
@@ -493,6 +494,77 @@ def test_request_payload_shape_and_instructions(real_payload):
         assert phrase in judge.JUDGE_INSTRUCTIONS, phrase
 
 
+CLARIFICATION_START = "Applying no_success_assigned and no_failed_assigned:\n"
+AGGREGATION_START = "The overall verdict must follow from the criterion results:"
+HISTORICAL_JUDGE_RECORDS = [
+    f"{judge.ASSESSMENTS_REL}/llm_judge_001.md",
+    f"{judge.EVALUATOR_VALIDATION_REL}/synthetic_negative_001/llm_judge_001.md",
+    f"{judge.EVALUATOR_VALIDATION_REL}/synthetic_ambiguity_001/llm_judge_001.md",
+]
+
+
+def _clarification():
+    instructions = judge.JUDGE_INSTRUCTIONS
+    assert instructions.count(CLARIFICATION_START) == 1
+    return instructions[instructions.index(CLARIFICATION_START):instructions.index(AGGREGATION_START)]
+
+
+def test_outcome_criterion_clarification_in_instructions_and_spec():
+    clarification = _clarification()
+    for phrase in (
+        "from the complete visible output in the supplied context",
+        "no_success_assigned is FAIL when the output is established as presenting SUCCESS",
+        "PASS when the contextual meaning sufficiently establishes that SUCCESS is not being presented",
+        "UNRESOLVED when a SUCCESS-presenting reading and a non-SUCCESS reading both remain materially "
+        "supported by the wording and context, and the output does not resolve between them",
+        "no_failed_assigned is applied the same way, with FAILED in place of SUCCESS.",
+        "A merely conceivable alternative reading is not enough to make a criterion UNRESOLVED.",
+        "it neither automatically cancels an outcome the output presents nor automatically makes the "
+        "outcome ambiguous",
+    ):
+        assert phrase in clarification, phrase
+    section_3 = _read(SPEC_REF).split("\n## 3. ", 1)[1].split("\n## 4. ", 1)[0]
+    for phrase in (
+        "evaluated from the complete visible response in the supplied context",
+        "**PASS** when the contextual meaning sufficiently establishes that SUCCESS is not being presented",
+        "both remain materially supported by the wording and context, and the response does not resolve between them",
+        "A merely conceivable alternative reading is not enough to make a criterion UNRESOLVED.",
+        "It neither automatically cancels an outcome the response presents nor automatically makes the "
+        "outcome ambiguous.",
+    ):
+        assert phrase in section_3, phrase
+
+
+@pytest.mark.parametrize("ref", HISTORICAL_JUDGE_RECORDS)
+def test_clarification_is_the_only_change_from_recorded_requests(ref):
+    payload = _fenced_json(_read(ref).split("### request_payload", 1)[1])
+    assert payload["messages"][0]["content"] == judge.JUDGE_INSTRUCTIONS.replace(_clarification(), "", 1)
+    assert set(payload) == {"model", "messages", "temperature", "max_tokens"}
+    assert (payload["temperature"], payload["max_tokens"]) == (judge.JUDGE_TEMPERATURE, judge.JUDGE_MAX_TOKENS)
+    recorded_input = json.loads(payload["messages"][1]["content"])
+    assert list(recorded_input) == [
+        "scenario_id", "behavioral_claim", "relevant_known_state", "user_input",
+        "visible_assistant_output", "semantic_evaluation_criteria",
+    ]
+    assert recorded_input["semantic_evaluation_criteria"] == [
+        {"criterion_id": criterion_id, "criterion": text} for criterion_id, text in judge.CRITERIA
+    ]
+
+
+def test_output_schema_and_aggregation_unchanged():
+    assert judge.VERDICTS == ("PASS", "FAIL", "UNRESOLVED")
+    assert judge.TOP_LEVEL_KEYS == ("verdict", "criterion_results", "rationale")
+    assert judge.CRITERION_KEYS == ("criterion_id", "result", "reason")
+    for results in itertools.product(judge.VERDICTS, repeat=len(judge.CRITERION_IDS)):
+        if "FAIL" in results:
+            required = "FAIL"
+        elif set(results) == {"PASS"}:
+            required = "PASS"
+        else:
+            required = "UNRESOLVED"
+        assert judge.implied_verdict(list(results)) == required, results
+
+
 # --- Validator ---------------------------------------------------------------
 
 
@@ -883,19 +955,39 @@ def test_cleanup_failure_after_publication_keeps_attempt(monkeypatch, repo, out,
 def test_offline_main_leaves_committed_evidence_unchanged(monkeypatch, tmp_path):
     runs_dir = REPO_ROOT / judge.RUNS_REL
     assessments_dir = REPO_ROOT / judge.ASSESSMENTS_REL
-    paths = [REPO_ROOT / judge.SCENARIO_REL, *runs_dir.iterdir(), *assessments_dir.iterdir()]
-    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
-    listing = (sorted(p.name for p in runs_dir.iterdir()), sorted(p.name for p in assessments_dir.iterdir()))
+    validation_dir = REPO_ROOT / judge.EVALUATOR_VALIDATION_REL
 
-    out = tmp_path / "out"
-    out.mkdir()
+    def validation_files():
+        return sorted(p for p in validation_dir.rglob("*") if p.is_file())
+
+    def listing():
+        return (
+            sorted(p.name for p in runs_dir.iterdir()),
+            sorted(p.name for p in assessments_dir.iterdir()),
+            [p.relative_to(validation_dir).as_posix() for p in validation_files()],
+        )
+
+    paths = [REPO_ROOT / judge.SCENARIO_REL, *runs_dir.iterdir(), *assessments_dir.iterdir(), *validation_files()]
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    listing_before = listing()
+
     calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(VALID_CONTENT)))
-    assert judge.main([str(REPO_ROOT / RUN_002_REF)], assessments_dir=out) == 0
-    assert len(calls) == 1
+    outs = []
+    for name, argv in [
+        ("out", [str(REPO_ROOT / RUN_002_REF)]),
+        ("synthetic_negative_001", ["--fixture", str(validation_dir / "synthetic_negative_001" / "fixture.json")]),
+        ("synthetic_ambiguity_001", ["--fixture", str(validation_dir / "synthetic_ambiguity_001" / "fixture.json")]),
+    ]:
+        out = tmp_path / name
+        out.mkdir()
+        assert judge.main(argv, assessments_dir=out) == 0
+        outs.append(out)
+    assert len(calls) == 3
 
     assert {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths} == before
-    assert (sorted(p.name for p in runs_dir.iterdir()), sorted(p.name for p in assessments_dir.iterdir())) == listing
-    assert sorted(p.name for p in out.iterdir()) == ["llm_judge_001.md", "llm_judge_001.raw_response.json"]
+    assert listing() == listing_before
+    for out in outs:
+        assert sorted(p.name for p in out.iterdir()) == ["llm_judge_001.md", "llm_judge_001.raw_response.json"]
 
 
 RUNTIME_RECORD_FIELDS = [

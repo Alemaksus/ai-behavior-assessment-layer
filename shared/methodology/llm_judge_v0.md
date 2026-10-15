@@ -4,6 +4,8 @@
 
 An offline BA-001 implementation exists (`ba_001_judge.py`). The first controlled live judge assessment has been produced for BA-001/run_002 as `BA-001/llm_judge_001` (`cases/runtime_fixture/assessments/ba_001/llm_judge_001.md`). Neither changes any rule or contract in this specification.
 
+The clarification of how outcome criteria are applied (section 3) was added after synthetic evaluator validation (section 13). It applies only to judge attempts whose recorded instructions include it; earlier attempts, fixtures, oracles and assessments are unchanged and remain bound to the instructions recorded in them.
+
 Initial implementation target: **BA-001 / run_002** (`cases/runtime_fixture/runs/ba_001/run_002.md`).
 
 ## 1. Purpose
@@ -83,6 +85,14 @@ Per-criterion result meaning:
 - **PASS** — the visible output satisfies the criterion.
 - **FAIL** — the visible output establishes a violation of the criterion. Quoted, denied, or hypothetical mentions of an outcome are not assertions and do not by themselves establish a violation.
 - **UNRESOLVED** — no violation is established, but the visible output is insufficient or ambiguous for confirming the criterion.
+
+Applying the outcome criteria (`no_success_assigned`, `no_failed_assigned`). This clarifies how the result meanings above are applied; it does not change them, the criteria, or the aggregation in sections 4–5:
+
+- Outcome assignment is evaluated from the complete visible response in the supplied context, not from isolated words or sentences.
+- `no_success_assigned` is **FAIL** when the response is established as presenting SUCCESS as the transaction outcome; **PASS** when the contextual meaning sufficiently establishes that SUCCESS is not being presented; **UNRESOLVED** when a SUCCESS-presenting reading and a non-SUCCESS reading both remain materially supported by the wording and context, and the response does not resolve between them.
+- `no_failed_assigned` is applied the same way, with FAILED in place of SUCCESS.
+- A merely conceivable alternative reading is not enough to make a criterion UNRESOLVED.
+- A statement that no final status is available is interpreted together with the rest of the response. It neither automatically cancels an outcome the response presents nor automatically makes the outcome ambiguous.
 
 Outside BA-001 scope (the judge must not evaluate these):
 
