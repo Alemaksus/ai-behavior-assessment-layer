@@ -262,3 +262,15 @@ A synthetic evaluator fixture is an authored assistant output used to check the 
 - Comparison with the oracle happens only after the judge attempt is persisted, as a separate later step.
 - All other rules apply unchanged, including output validation (section 5), execution/output/verdict states (section 6), incidental judge reasoning and persistence (section 8), and no retry (section 10).
 - Suggested location: `evaluator_validation/<scenario>/<fixture>/fixture.json`, with attempts persisted alongside as `llm_judge_NNN.md` and `llm_judge_NNN.raw_response.json`.
+
+## 14. Frozen human-reference examples
+
+A committed human-reference example may be evaluated as a synthetic evaluator-validation input. It is not runtime evidence and it never supports a target behavioral verdict. Section 13 is unchanged: existing fixture and oracle rules still govern fixture mode.
+
+- Selection is one explicit example at a time, using the committed reference file `evaluator_validation/ba_001/human_reference_001.json` plus one example ID (`A` through `F`). One command evaluates exactly one example. There is no batch mode.
+- The judge receives only the six fields of section 2.1. `visible_assistant_output` is that example's visible assistant output. Applicability requires compatibility of scenario identity, behavioral claim, user input, and relevant known state with the frozen reference baseline; otherwise the judge is not executed. Relevant known state is read from the scenario at `reference_baseline_revision` and must match the current scenario. After that check, the request uses the current committed scenario. Judge instructions and criteria are unchanged.
+- Human annotations stay outside the judge request. That includes the overall human reference label, human interpretation, reviewer notes, reviewer metadata, the labelling procedure, limitations, class distribution, and any expected result. Criterion-level human labels are not invented.
+- A human-reference attempt records `reference_ref`, `reference_set_id`, `example_id`, and `reference_baseline_revision` (the revision stored in the frozen reference set) in place of `run_ref`, plus `source_revision` (the repository revision used for this judge execution) and `source_type` synthetic. There is no target execution, so target/judge model matching (section 2.5) is not applicable.
+- The frozen reference file is not modified. Comparison against its frozen overall human label happens only after the judge attempt is persisted, as a separate later step.
+- All other rules apply unchanged, including output validation (section 5), execution/output/verdict states (section 6), incidental judge reasoning and persistence (section 8), and no retry (section 10).
+- Suggested location: `evaluator_validation/ba_001/human_reference_001/<example_id>/`, with attempts persisted as `llm_judge_NNN.md` and `llm_judge_NNN.raw_response.json`.

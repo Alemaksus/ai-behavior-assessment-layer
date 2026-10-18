@@ -7,6 +7,9 @@ from the repository root. Requires GROQ_JUDGE_MODEL and GROQ_API_KEY.
 Synthetic evaluator validation (spec section 13) runs on one committed fixture
 instead, persisting the attempt next to it:
 `python ba_001_judge.py --fixture evaluator_validation/ba_001/synthetic_negative_001/fixture.json`
+
+Frozen human-reference validation (spec section 14) runs on exactly one example:
+`python ba_001_judge.py --reference-example A`
 """
 
 import argparse
@@ -30,6 +33,9 @@ SCENARIO_REL = "cases/runtime_fixture/scenarios/ba_001_unknown_transaction_statu
 RUNS_REL = "cases/runtime_fixture/runs/ba_001"
 ASSESSMENTS_REL = "cases/runtime_fixture/assessments/ba_001"
 EVALUATOR_VALIDATION_REL = "evaluator_validation/ba_001"
+HUMAN_REFERENCE_REL = f"{EVALUATOR_VALIDATION_REL}/human_reference_001.json"
+HUMAN_REFERENCE_SET_ID = f"{SCENARIO_ID}/human_reference_001"
+REFERENCE_EXAMPLE_IDS = ("A", "B", "C", "D", "E", "F")
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -119,8 +125,11 @@ Response rules:
 
 _INVALID_JSON = object()
 _ATTEMPT_ARTIFACT_NAME = re.compile(r"^llm_judge_(\d+)(?:\.|$)")
+_PERSISTENCE_PROBE_SOURCE = ".airra_persistence_probe"
+_PERSISTENCE_PROBE_LINK = ".airra_persistence_probe.link"
 _RUN_REF = re.compile(re.escape(RUNS_REL) + r"/run_\d{3,}\.md")
 _FIXTURE_REF = re.compile(re.escape(EVALUATOR_VALIDATION_REL) + r"/(synthetic_[a-z]+_\d{3})/fixture\.json")
+_FULL_REVISION = re.compile(r"[0-9a-f]{40}")
 _SCENARIO_H1 = re.compile(r"# (\S+) — .+")
 _CELL_SEPARATOR = re.compile(r"(?<!\\)\|")
 
@@ -268,6 +277,22 @@ def _parse_scenario(text):
         "behavioral_claim": claim,
         "relevant_known_state": known_state,
     }
+
+
+def _scenario_user_input(text):
+    lines = text.split("\n")
+    index = _single_heading(lines, "## User input")
+    if index is None:
+        raise PreconditionError(f"{SCENARIO_REL} has no single '## User input' section")
+    body = []
+    for line in lines[index + 1:]:
+        if line.startswith("#"):
+            break
+        body.append(line)
+    quoted = "\n".join(body).strip()
+    if len(quoted) < 2 or not quoted.startswith('"') or not quoted.endswith('"') or "\n\n" in quoted:
+        raise PreconditionError(f"{SCENARIO_REL} user input is not exactly one quoted paragraph")
+    return quoted[1:-1]
 
 
 def _first_choice(parsed):
@@ -485,6 +510,129 @@ def load_synthetic_source(fixture_path, repo_root=REPO_ROOT):
         "relevant_known_state": scenario["relevant_known_state"],
         "user_input": material["user_input"],
         "visible_assistant_output": synthetic_output,
+    }
+
+
+def _required_text(reference_ref, obj, key):
+    value = obj.get(key) if isinstance(obj, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise PreconditionError(f"{reference_ref} {key} is missing or empty")
+    return value
+
+
+def _reference_extraction(reference_ref, reference, example_id):
+    # Positive construction only. Human annotation fields are never copied.
+    if not isinstance(reference, dict):
+        raise PreconditionError(f"{reference_ref} is not a JSON object")
+    reference_set_id = reference.get("reference_set_id")
+    if reference_set_id != HUMAN_REFERENCE_SET_ID:
+        raise PreconditionError(
+            f"{reference_ref} reference_set_id is not {HUMAN_REFERENCE_SET_ID!r}"
+        )
+    scenario_ref = reference.get("scenario_ref")
+    if scenario_ref != SCENARIO_REL:
+        raise PreconditionError(f"{reference_ref} scenario_ref is not {SCENARIO_REL!r}")
+    baseline_revision = reference.get("source_revision")
+    if not isinstance(baseline_revision, str) or not _FULL_REVISION.fullmatch(baseline_revision):
+        raise PreconditionError(f"{reference_ref} source_revision is not a full commit revision")
+    behavioral_claim = _required_text(reference_ref, reference, "behavioral_claim")
+    shared_user_input = _required_text(reference_ref, reference, "shared_user_input")
+
+    examples = reference.get("examples")
+    if not isinstance(examples, list):
+        raise PreconditionError(f"{reference_ref} examples is not a list")
+    selected = []
+    for index, example in enumerate(examples):
+        if not isinstance(example, dict):
+            raise PreconditionError(f"{reference_ref} examples[{index}] is not an object")
+        if example.get("example_id") == example_id:
+            selected.append(example.get("visible_assistant_output"))
+    if not selected:
+        raise PreconditionError(f"{reference_ref} has no example {example_id!r}")
+    if len(selected) > 1:
+        raise PreconditionError(f"{reference_ref} example {example_id!r} is duplicated")
+    visible_output = selected[0]
+    if not isinstance(visible_output, str) or not visible_output.strip():
+        raise PreconditionError(
+            f"{reference_ref} example {example_id!r} visible_assistant_output is empty or not a string"
+        )
+    return {
+        "reference_set_id": reference_set_id,
+        "source_revision": baseline_revision,
+        "scenario_ref": scenario_ref,
+        "behavioral_claim": behavioral_claim,
+        "shared_user_input": shared_user_input,
+        "example_id": example_id,
+        "visible_assistant_output": visible_output,
+    }
+
+
+def _resolve_baseline_revision(repo_root, revision):
+    resolved = _git(
+        repo_root, "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}",
+        failure=f"reference_baseline_revision {revision} cannot be resolved",
+    ).decode("utf-8").strip()
+    if resolved != revision:
+        raise PreconditionError(f"reference_baseline_revision {revision} cannot be resolved")
+    return resolved
+
+
+def load_human_reference_source(example_id, repo_root=REPO_ROOT):
+    if example_id not in REFERENCE_EXAMPLE_IDS:
+        raise PreconditionError(
+            f"reference example {example_id!r} is not one of {', '.join(REFERENCE_EXAMPLE_IDS)}"
+        )
+    repo_root = Path(repo_root).resolve()
+    reference_ref = HUMAN_REFERENCE_REL
+    sha = _head_revision(repo_root)
+    try:
+        parsed = json.loads(
+            _read_committed(repo_root, sha, reference_ref),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise PreconditionError(f"{reference_ref} is not strict JSON: {exc}") from None
+    extracted = _reference_extraction(reference_ref, parsed, example_id)
+    baseline_revision = _resolve_baseline_revision(repo_root, extracted["source_revision"])
+
+    _require_clean(repo_root, [reference_ref, SCENARIO_REL])
+    baseline_scenario = _parse_scenario(_read_committed(repo_root, baseline_revision, SCENARIO_REL))
+    scenario_text = _read_committed(repo_root, sha, SCENARIO_REL)
+    scenario = _parse_scenario(scenario_text)
+    if baseline_scenario["scenario_id"] != scenario["scenario_id"]:
+        raise PreconditionError(
+            f"{reference_ref} scenario identity is not compatible with {SCENARIO_REL} "
+            f"at reference_baseline_revision {baseline_revision}"
+        )
+    if list(baseline_scenario["relevant_known_state"].items()) != list(
+        scenario["relevant_known_state"].items()
+    ):
+        raise PreconditionError(
+            f"{reference_ref} relevant_known_state is not compatible with {SCENARIO_REL} "
+            f"at reference_baseline_revision {baseline_revision}"
+        )
+    if extracted["behavioral_claim"] != scenario["behavioral_claim"]:
+        raise PreconditionError(
+            f"{reference_ref} behavioral_claim is not compatible with {SCENARIO_REL}"
+        )
+    if extracted["shared_user_input"] != _scenario_user_input(scenario_text):
+        raise PreconditionError(
+            f"{reference_ref} shared_user_input is not compatible with {SCENARIO_REL}"
+        )
+
+    return {
+        "reference_ref": reference_ref,
+        "reference_set_id": extracted["reference_set_id"],
+        "example_id": extracted["example_id"],
+        "reference_baseline_revision": extracted["source_revision"],
+        "source_revision": sha,
+        "uncommitted_tracked_changes": _has_tracked_changes(repo_root),
+        "scenario_id": scenario["scenario_id"],
+        "behavioral_claim": extracted["behavioral_claim"],
+        "relevant_known_state": scenario["relevant_known_state"],
+        "user_input": extracted["shared_user_input"],
+        "visible_assistant_output": extracted["visible_assistant_output"],
     }
 
 
@@ -774,11 +922,17 @@ def _is_synthetic(source):
     return "fixture_ref" in source
 
 
+def _is_reference(source):
+    return "reference_ref" in source
+
+
 def _models_match(source, execution):
     return execution["request"]["payload"]["model"] == source["target_requested_model"]
 
 
 def _model_match_text(source, execution):
+    if _is_reference(source):
+        return "not applicable (synthetic human-reference example; no target model)"
     if _is_synthetic(source):
         return "not applicable (synthetic authored output; no target model)"
     return (
@@ -810,17 +964,51 @@ def _synthetic_notes():
     ]
 
 
+def _reference_notes():
+    return [
+        "- This is evaluator-validation evidence for the frozen human-reference example "
+        "identified by reference_ref and example_id. The example is synthetic "
+        "evaluator-validation input, and this result is not a target behavioral verdict. "
+        "It does not modify the frozen human reference or any existing assessment.",
+        "- Judge input was limited to six fields extracted from committed files at "
+        "source_revision: scenario_id, behavioral_claim, relevant_known_state, user_input, "
+        "visible_assistant_output, semantic_evaluation_criteria. visible_assistant_output is "
+        "the selected example's visible assistant output. Human annotations were not part of "
+        "the judge request. The judge input files were verified to have no uncommitted changes.",
+        "- reference_baseline_revision is the revision stored in the frozen reference set. "
+        "source_revision is the repository revision used for this judge execution.",
+        "- Comparison with the frozen overall human reference label is a separate step after "
+        "this attempt is persisted. No criterion-level human labels were used.",
+        "- There is no target execution for this synthetic input, so target/judge model "
+        "matching is not applicable.",
+        "- Incidental judge reasoning, if present in the raw response, was not used as "
+        "assessment evidence.",
+        "- There is no automatic retry. semantic_verdict is recorded only when "
+        "judge_output_status is VALID; execution failures and invalid outputs are never "
+        "converted into UNRESOLVED.",
+    ]
+
+
 def render_attempt_record(attempt_id, source, execution, states, raw_filename):
     request = execution["request"]
     payload = request["payload"]
     metadata = response_metadata(execution["raw_body"])
-    synthetic = _is_synthetic(source)
     output_status = states["judge_output_status"]
-    attempt_scope = source["fixture_id"] if synthetic else SCENARIO_ID
-    source_rows = (
-        [("fixture_ref", source["fixture_ref"]), ("source_type", "synthetic")]
-        if synthetic else [("run_ref", source["run_ref"])]
-    )
+    if _is_reference(source):
+        attempt_scope = f"{source['reference_set_id']}/{source['example_id']}"
+        source_rows = [
+            ("reference_ref", source["reference_ref"]),
+            ("reference_set_id", source["reference_set_id"]),
+            ("example_id", source["example_id"]),
+            ("reference_baseline_revision", source["reference_baseline_revision"]),
+            ("source_type", "synthetic"),
+        ]
+    elif _is_synthetic(source):
+        attempt_scope = source["fixture_id"]
+        source_rows = [("fixture_ref", source["fixture_ref"]), ("source_type", "synthetic")]
+    else:
+        attempt_scope = SCENARIO_ID
+        source_rows = [("run_ref", source["run_ref"])]
 
     summary = [
         ("assessment_id", f"{attempt_scope}/{attempt_id}"),
@@ -874,7 +1062,10 @@ def render_attempt_record(attempt_id, source, execution, states, raw_filename):
         else f"not recorded (judge_output_status: {output_status})"
     )
 
-    if synthetic:
+    if _is_reference(source):
+        title = f"# LLM judge evaluator-validation attempt — {attempt_scope} / {attempt_id}"
+        notes = _reference_notes()
+    elif _is_synthetic(source):
         title = f"# LLM judge evaluator-validation attempt — {attempt_scope} / {attempt_id}"
         notes = _synthetic_notes()
     else:
@@ -948,16 +1139,18 @@ def write_attempt(assessments_dir, attempt_id, record, raw_filename, raw_body):
 
 def print_report(source, execution, states):
     metadata = response_metadata(execution["raw_body"])
-    synthetic = _is_synthetic(source)
     print(f"scenario_id: {SCENARIO_ID}")
-    if synthetic:
+    if _is_reference(source):
+        print(f"reference_ref: {source['reference_ref']}")
+        print(f"example_id: {source['example_id']}")
+    elif _is_synthetic(source):
         print(f"fixture_ref: {source['fixture_ref']}")
     else:
         print(f"run_ref: {source['run_ref']}")
     print(f"assessed_at: {execution['assessed_at']}")
     print(f"judge requested model: {execution['request']['payload']['model']}")
     print(f"judge response model: {metadata['model']}")
-    if synthetic:
+    if _is_reference(source) or _is_synthetic(source):
         print("judge model matches target model: not applicable")
     else:
         print(f"judge model matches target model: {'yes' if _models_match(source, execution) else 'no'}")
@@ -973,8 +1166,8 @@ def print_report(source, execution, states):
 
 def _parse_args(argv):
     parser = argparse.ArgumentParser(
-        description=f"Run LLM Judge v0 once on one committed {SCENARIO_ID} run record "
-                    "or synthetic evaluator fixture."
+        description=f"Run LLM Judge v0 once on one committed {SCENARIO_ID} run record, "
+                    "synthetic evaluator fixture, or frozen human-reference example."
     )
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("run_path", nargs="?", help=f"for example {RUNS_REL}/run_002.md")
@@ -982,7 +1175,85 @@ def _parse_args(argv):
         "--fixture",
         help=f"for example {EVALUATOR_VALIDATION_REL}/synthetic_negative_001/fixture.json",
     )
+    target.add_argument(
+        "--reference-example",
+        choices=REFERENCE_EXAMPLE_IDS,
+        metavar="A|B|C|D|E|F",
+        help="evaluate exactly one frozen human-reference example",
+    )
     return parser.parse_args(argv)
+
+
+def _blocking_directory(path):
+    current = path if path.exists() else path.parent
+    while current != current.parent:
+        if current.exists():
+            return None if current.is_dir() else current
+        current = current.parent
+    return None
+
+
+def _persistence_unusable(path, exc):
+    return (
+        f"reference attempt directory {path} is not usable for persistence "
+        f"({type(exc).__name__}: {exc})"
+    )
+
+
+def _unlink_owned(owned):
+    error = None
+    for artifact in reversed(owned):
+        try:
+            artifact.unlink()
+        except OSError as exc:
+            error = exc
+    return error
+
+
+def _probe_hardlink_persistence(directory):
+    # Names are recorded only after this invocation creates them. os.link fails
+    # without replacing a destination that already exists.
+    source = directory / _PERSISTENCE_PROBE_SOURCE
+    linked = directory / _PERSISTENCE_PROBE_LINK
+    owned = []
+    try:
+        try:
+            probe_file = open(source, "x", encoding="utf-8")
+        except OSError as exc:
+            raise PreconditionError(_persistence_unusable(directory, exc)) from exc
+        owned.append(source)
+        try:
+            with probe_file:
+                probe_file.write("")
+            os.link(source, linked)
+        except OSError as exc:
+            raise PreconditionError(_persistence_unusable(directory, exc)) from exc
+        owned.append(linked)
+    finally:
+        cleanup_error = _unlink_owned(owned)
+    if cleanup_error is not None:
+        raise PreconditionError(_persistence_unusable(directory, cleanup_error)) from cleanup_error
+
+
+def _prepare_reference_destination(path, *, create):
+    # Prove exclusive create and os.link both work here, before any provider call.
+    path = Path(path)
+    blocker = _blocking_directory(path)
+    if blocker is not None:
+        raise PreconditionError(
+            f"reference attempt directory {path} cannot be prepared: {blocker} is not a directory"
+        )
+    if create:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise PreconditionError(
+                f"reference attempt directory {path} cannot be prepared "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
+    if not path.is_dir():
+        raise PreconditionError(f"assessments directory {path} does not exist")
+    _probe_hardlink_persistence(path)
 
 
 def main(argv=None, *, repo_root=REPO_ROOT, assessments_dir=None):
@@ -990,18 +1261,32 @@ def main(argv=None, *, repo_root=REPO_ROOT, assessments_dir=None):
     repo_root = Path(repo_root).resolve()
 
     try:
-        if args.fixture is not None:
+        prepare_reference_dir = False
+        if args.reference_example is not None:
+            default_dir = (
+                repo_root / EVALUATOR_VALIDATION_REL / "human_reference_001" / args.reference_example
+            )
+            prepare_reference_dir = assessments_dir is None
+        elif args.fixture is not None:
             default_dir = repo_root / _fixture_ref(args.fixture, repo_root).rsplit("/", 1)[0]
         else:
             default_dir = repo_root / ASSESSMENTS_REL
-        assessments_dir = Path(assessments_dir) if assessments_dir is not None else default_dir
-        if not assessments_dir.is_dir():
+        if assessments_dir is None:
+            assessments_dir = default_dir
+        else:
+            assessments_dir = Path(assessments_dir)
+            prepare_reference_dir = False
+        if args.reference_example is None and not assessments_dir.is_dir():
             raise PreconditionError(f"assessments directory {assessments_dir} does not exist")
-        if args.fixture is not None:
+        if args.reference_example is not None:
+            source = load_human_reference_source(args.reference_example, repo_root)
+        elif args.fixture is not None:
             source = load_synthetic_source(args.fixture, repo_root)
         else:
             source = load_judge_source(args.run_path, repo_root)
         judge_model = judge_model_from_env()
+        if args.reference_example is not None:
+            _prepare_reference_destination(assessments_dir, create=prepare_reference_dir)
     except PreconditionError as exc:
         print(f"Refused: {exc}", file=sys.stderr)
         print(
@@ -1038,7 +1323,7 @@ def main(argv=None, *, repo_root=REPO_ROOT, assessments_dir=None):
     print(f"\nPersisted {SCENARIO_ID} judge attempt record: {md_path}")
     if raw_filename is not None:
         print(f"Raw response: {assessments_dir / raw_filename}")
-    if _is_synthetic(source):
+    if _is_reference(source) or _is_synthetic(source):
         print("This is evaluator-validation evidence, not a target behavioral verdict.")
     else:
         print("This is an independent judge signal, not a final behavioral verdict.")

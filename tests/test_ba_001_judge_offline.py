@@ -314,8 +314,13 @@ def template_repo(tmp_path_factory):
         target.write_bytes(_committed_bytes(ref))
     (repo / SYNTHETIC_DIR_REF).mkdir(parents=True)
     (repo / SYNTHETIC_REF).write_bytes((REPO_ROOT / SYNTHETIC_REF).read_bytes())
+    (repo / judge.HUMAN_REFERENCE_REL).write_bytes((REPO_ROOT / judge.HUMAN_REFERENCE_REL).read_bytes())
     (repo / "notes.txt").write_text("unrelated tracked file\n")
     _git(repo, "init", "-q")
+    # The frozen reference records a baseline commit that is not this fixture commit.
+    alternate = repo / ".git" / "objects" / "info" / "alternates"
+    alternate.parent.mkdir(parents=True, exist_ok=True)
+    alternate.write_text(f"{(REPO_ROOT / '.git' / 'objects').resolve()}\n")
     _commit(repo, "fixture")
     return repo
 
@@ -977,12 +982,13 @@ def test_offline_main_leaves_committed_evidence_unchanged(monkeypatch, tmp_path)
         ("out", [str(REPO_ROOT / RUN_002_REF)]),
         ("synthetic_negative_001", ["--fixture", str(validation_dir / "synthetic_negative_001" / "fixture.json")]),
         ("synthetic_ambiguity_001", ["--fixture", str(validation_dir / "synthetic_ambiguity_001" / "fixture.json")]),
+        ("human_reference_A", ["--reference-example", "A"]),
     ]:
         out = tmp_path / name
         out.mkdir()
         assert judge.main(argv, assessments_dir=out) == 0
         outs.append(out)
-    assert len(calls) == 3
+    assert len(calls) == 4
 
     assert {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths} == before
     assert listing() == listing_before
@@ -1014,6 +1020,9 @@ def test_runtime_record_layout_is_unchanged(monkeypatch, repo, out):
     assert "source_type" not in record
     assert "synthetic" not in record
     assert "evaluator-validation" not in record
+    assert "reference_ref" not in record
+    assert "reference_baseline_revision" not in record
+    assert "human_reference" not in record
 
 
 # --- Synthetic evaluator fixture (spec section 13) ---------------------------
@@ -1187,7 +1196,8 @@ def test_synthetic_attempt_persists_next_to_fixture(monkeypatch, repo, capsys):
     assert REASONING_NOTE in notes
     for absent in ("| run_ref |", "target run", "run_002", "run_003", "not independent-model validation",
                    "final_verdict", INCIDENTAL_REASONING, API_KEY,
-                   _fixture_data(repo)["oracle"]["rationale"], "expected_semantic_verdict"):
+                   _fixture_data(repo)["oracle"]["rationale"], "expected_semantic_verdict",
+                   "reference_ref", "reference_baseline_revision", "human_reference"):
         assert absent not in record, absent
     output = capsys.readouterr().out
     assert f"fixture_ref: {SYNTHETIC_REF}" in output
@@ -1312,3 +1322,680 @@ def test_run_path_and_fixture_are_mutually_exclusive(repo):
     with pytest.raises(SystemExit) as exc_info:
         judge.main([str(repo / RUN_002_REF), "--fixture", str(repo / SYNTHETIC_REF)], repo_root=repo)
     assert exc_info.value.code == 2
+
+
+# --- Frozen human-reference examples (spec section 14) -----------------------
+
+
+REFERENCE_BASELINE_REVISION = "7d584372f17fd5918e68600c3b0f0d626c723862"
+REFERENCE_SOURCE_KEYS = {
+    "reference_ref", "reference_set_id", "example_id", "reference_baseline_revision",
+    "source_revision", "uncommitted_tracked_changes", "scenario_id", "behavioral_claim",
+    "relevant_known_state", "user_input", "visible_assistant_output",
+}
+REFERENCE_RECORD_FIELDS = [
+    "assessment_id", "assessor_type", "method", "scenario_id", "reference_ref",
+    "reference_set_id", "example_id", "reference_baseline_revision", "source_type",
+    "assessed_at", "judge_execution_status", "judge_output_status", "semantic_verdict",
+    "judge_provider", "judge_requested_model", "judge_response_model",
+    "judge_model_matches_target_model", "source_revision", "prompt", "http_status",
+    "latency_seconds", "error", "finish_reason", "raw_response_file",
+]
+JUDGE_INPUT_FIELDS = [
+    "scenario_id", "behavioral_claim", "relevant_known_state", "user_input",
+    "visible_assistant_output", "semantic_evaluation_criteria",
+]
+# Stubbed judge output used to exercise persistence. It is not a human-reference expectation.
+REFERENCE_STUB_OBJ = _obj("UNRESOLVED", _results("PASS", "UNRESOLVED", "PASS", "PASS"))
+REFERENCE_STUB = json.dumps(REFERENCE_STUB_OBJ)
+ANNOTATION_MARKERS = (
+    "MARKER_PURPOSE_forbidden",
+    "MARKER_REVIEWER_forbidden",
+    "MARKER_PROCEDURE_forbidden",
+    "MARKER_FREEZE_forbidden",
+    "MARKER_LIMITATION_forbidden",
+    "MARKER_INTERPRETATION_forbidden",
+    "MARKER_LABEL_forbidden",
+    "MARKER_NOTE_forbidden",
+    "MARKER_EXPECTED_forbidden",
+    "MARKER_DISTRIBUTION_forbidden",
+    "MARKER_PREVIOUS_JUDGE_forbidden",
+)
+ANNOTATION_TEXT_LEAKS = (
+    "The final outcome is still not established.",
+    "On the final strict reading, the response communicates that the transfer went through.",
+    "The reviewer initially considered UNRESOLVED plausible.",
+    "human_reviewer_001",
+    "Frozen single-reviewer reference judgments",
+    "predictions_withheld",
+    "Label distribution: PASS=4, FAIL=2, UNRESOLVED=0.",
+    "human_reference_label",
+    "human_interpretation",
+    "reviewer_note",
+)
+REQUEST_PROVENANCE_LEAKS = (
+    REFERENCE_BASELINE_REVISION,
+    judge.HUMAN_REFERENCE_SET_ID,
+    *ANNOTATION_TEXT_LEAKS,
+)
+
+
+def _reference_document(root=REPO_ROOT):
+    return json.loads((root / judge.HUMAN_REFERENCE_REL).read_text(encoding="utf-8"))
+
+
+def _reference_outputs(root=REPO_ROOT):
+    outputs = {}
+    for example in _reference_document(root)["examples"]:
+        example_id = example["example_id"]
+        assert example_id not in outputs
+        outputs[example_id] = example["visible_assistant_output"]
+    return outputs
+
+
+def _reference_payload(repo, example_id):
+    source = judge.load_human_reference_source(example_id, repo)
+    return judge.prepare_judge_request(source, judge.judge_model_from_env())["payload"]
+
+
+def _reference_dir(repo, example_id):
+    return repo / judge.EVALUATOR_VALIDATION_REL / "human_reference_001" / example_id
+
+
+def _commit_reference(repo, change):
+    path = repo / judge.HUMAN_REFERENCE_REL
+    reference = json.loads(path.read_text(encoding="utf-8"))
+    change(reference)
+    path.write_text(json.dumps(reference, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _commit(repo, "edit human reference")
+
+
+def _mark_annotations(reference):
+    reference["purpose"] = ANNOTATION_MARKERS[0]
+    reference["reviewer"] = {"reviewer_id": ANNOTATION_MARKERS[1], "reviewer_count": 1}
+    reference["labelling_procedure"] = {"note": ANNOTATION_MARKERS[2]}
+    reference["freeze"] = {"frozen_at": ANNOTATION_MARKERS[3]}
+    reference["limitations"] = [ANNOTATION_MARKERS[4]]
+    reference["expected_result"] = ANNOTATION_MARKERS[8]
+    reference["class_distribution"] = ANNOTATION_MARKERS[9]
+    reference["previous_judge_results"] = ANNOTATION_MARKERS[10]
+    for example in reference["examples"]:
+        example["human_interpretation"] = ANNOTATION_MARKERS[5]
+        example["human_reference_label"] = ANNOTATION_MARKERS[6]
+        example["reviewer_note"] = ANNOTATION_MARKERS[7]
+        example["expected_result"] = ANNOTATION_MARKERS[8]
+
+
+def test_human_reference_addendum_keeps_existing_fixture_rules():
+    spec = _read(SPEC_REF)
+    section_13 = spec.split("\n## 13. ", 1)[1].split("\n## 14. ", 1)[0]
+    section_14 = spec.split("\n## 14. ", 1)[1]
+    assert "Comparison with the oracle happens only after the judge attempt is persisted" in section_13
+    assert "fixture.json" in section_13
+    for phrase in (
+        "synthetic evaluator-validation input",
+        "evaluator_validation/ba_001/human_reference_001.json",
+        "one example ID",
+        "Human annotations stay outside the judge request",
+        "Criterion-level human labels are not invented",
+        "only after the judge attempt is persisted",
+        "Section 13 is unchanged",
+        "scenario identity, behavioral claim, user input, and relevant known state",
+        "frozen reference baseline",
+    ):
+        assert phrase in section_14, phrase
+
+
+def test_frozen_human_reference_file_matches_head():
+    path = REPO_ROOT / judge.HUMAN_REFERENCE_REL
+    assert path.read_bytes() == _committed_bytes(judge.HUMAN_REFERENCE_REL)
+    assert _reference_document()["source_revision"] == REFERENCE_BASELINE_REVISION
+    assert list(_reference_outputs()) == list(judge.REFERENCE_EXAMPLE_IDS)
+
+
+@pytest.mark.parametrize("example_id", judge.REFERENCE_EXAMPLE_IDS)
+def test_each_reference_example_is_selectable_and_keeps_the_six_field_request(repo, example_id):
+    source = judge.load_human_reference_source(example_id, repo)
+    runtime_input = judge.build_judge_input(judge.load_judge_source(repo / RUN_002_REF, repo))
+    payload = judge.prepare_judge_request(source, JUDGE_MODEL)["payload"]
+    judge_input = json.loads(payload["messages"][1]["content"])
+
+    assert set(source) == REFERENCE_SOURCE_KEYS
+    assert source["example_id"] == example_id
+    assert source["reference_ref"] == judge.HUMAN_REFERENCE_REL
+    assert source["reference_set_id"] == judge.HUMAN_REFERENCE_SET_ID
+    assert source["reference_baseline_revision"] == REFERENCE_BASELINE_REVISION
+    assert source["visible_assistant_output"] == _reference_outputs(repo)[example_id]
+    assert list(judge_input) == JUDGE_INPUT_FIELDS
+    assert judge_input["visible_assistant_output"] == _reference_outputs(repo)[example_id]
+    for field, value in runtime_input.items():
+        if field != "visible_assistant_output":
+            assert judge_input[field] == value, field
+    assert set(payload) == {"model", "messages", "temperature", "max_tokens"}
+    assert [message["role"] for message in payload["messages"]] == ["system", "user"]
+    assert payload["messages"][0]["content"] == judge.JUDGE_INSTRUCTIONS
+    assert payload["temperature"] == judge.JUDGE_TEMPERATURE == 0
+    assert payload["max_tokens"] == judge.JUDGE_MAX_TOKENS == 4096
+    request_text = json.dumps(payload["messages"], ensure_ascii=False)
+    for leak in REQUEST_PROVENANCE_LEAKS:
+        assert leak not in request_text, leak
+
+
+def test_annotation_markers_do_not_change_system_or_user_messages(repo):
+    clean = {
+        example_id: _reference_payload(repo, example_id) for example_id in judge.REFERENCE_EXAMPLE_IDS
+    }
+    _commit_reference(repo, _mark_annotations)
+    for example_id in judge.REFERENCE_EXAMPLE_IDS:
+        marked = _reference_payload(repo, example_id)
+        assert marked["messages"] == clean[example_id]["messages"]
+        assert marked["temperature"] == clean[example_id]["temperature"]
+        assert marked["max_tokens"] == clean[example_id]["max_tokens"]
+        assert marked["model"] == clean[example_id]["model"]
+        request_text = json.dumps(marked["messages"], ensure_ascii=False)
+        for marker in ANNOTATION_MARKERS:
+            assert marker not in request_text
+        assert marked["messages"][1]["content"].count(_reference_outputs()[example_id]) == 1
+
+
+@pytest.mark.parametrize("example_id", ["G", "a", "AB", "A,B", "*"])
+def test_invalid_reference_example_ids_are_rejected(example_id):
+    with pytest.raises(SystemExit) as exc_info:
+        judge.main(["--reference-example", example_id])
+    assert exc_info.value.code == 2
+
+
+def test_loader_rejects_example_id_outside_a_through_f(repo):
+    with pytest.raises(judge.PreconditionError, match="is not one of A, B, C, D, E, F"):
+        judge.load_human_reference_source("G", repo)
+
+
+def test_reference_example_rejects_batch_flag():
+    with pytest.raises(SystemExit) as exc_info:
+        judge.main(["--all"])
+    assert exc_info.value.code == 2
+
+
+def test_reference_example_is_mutually_exclusive(repo):
+    cases = [
+        [str(repo / RUN_002_REF), "--reference-example", "A"],
+        ["--fixture", str(repo / SYNTHETIC_REF), "--reference-example", "B"],
+        ["--reference-example", "C", str(repo / RUN_002_REF)],
+    ]
+    for argv in cases:
+        with pytest.raises(SystemExit) as exc_info:
+            judge.main(argv, repo_root=repo)
+        assert exc_info.value.code == 2
+
+
+def _assert_reference_refused(repo, out, argv, expected, capsys):
+    _assert_refused(repo, out, argv, expected, capsys)
+    assert not (repo / judge.EVALUATOR_VALIDATION_REL / "human_reference_001").exists()
+
+
+def test_reference_rejects_missing_example(repo, out, capsys):
+    _commit_reference(repo, lambda reference: reference["examples"].pop(1))
+    _assert_reference_refused(repo, out, ["--reference-example", "B"], "has no example 'B'", capsys)
+
+
+def test_reference_rejects_duplicate_example(repo, out, capsys):
+    def duplicate(reference):
+        selected = next(example for example in reference["examples"] if example["example_id"] == "A")
+        reference["examples"].append(dict(selected))
+
+    _commit_reference(repo, duplicate)
+    _assert_reference_refused(repo, out, ["--reference-example", "A"], "example 'A' is duplicated", capsys)
+
+
+def test_reference_rejects_malformed_json(repo, out, capsys):
+    path = repo / judge.HUMAN_REFERENCE_REL
+    path.write_text("{", encoding="utf-8")
+    _commit(repo, "malformed human reference")
+    _assert_reference_refused(repo, out, ["--reference-example", "A"], "is not strict JSON", capsys)
+
+
+def test_reference_rejects_duplicate_json_key(repo, out, capsys):
+    path = repo / judge.HUMAN_REFERENCE_REL
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace(
+        '"reference_set_id": "BA-001/human_reference_001",',
+        '"reference_set_id": "BA-001/human_reference_001", '
+        '"reference_set_id": "BA-001/human_reference_001",',
+        1,
+    ), encoding="utf-8")
+    _commit(repo, "duplicate human-reference key")
+    _assert_reference_refused(
+        repo, out, ["--reference-example", "A"], "duplicate JSON key 'reference_set_id'", capsys,
+    )
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\n\t"])
+def test_reference_rejects_empty_visible_output(repo, out, capsys, value):
+    def clear(reference):
+        for example in reference["examples"]:
+            if example["example_id"] == "C":
+                example["visible_assistant_output"] = value
+
+    _commit_reference(repo, clear)
+    _assert_reference_refused(
+        repo, out, ["--reference-example", "C"],
+        "example 'C' visible_assistant_output is empty or not a string", capsys,
+    )
+
+
+@pytest.mark.parametrize("change, expected", [
+    pytest.param(lambda reference: reference.update(reference_set_id="BA-001/human_reference_002"),
+                 "reference_set_id is not 'BA-001/human_reference_001'", id="reference_set_id"),
+    pytest.param(lambda reference: reference.update(scenario_ref="cases/other.md"),
+                 f"scenario_ref is not {judge.SCENARIO_REL!r}", id="scenario_ref"),
+    pytest.param(lambda reference: reference.update(source_revision="not-a-revision"),
+                 "source_revision is not a full commit revision", id="baseline_revision"),
+    pytest.param(lambda reference: reference.update(behavioral_claim="A different claim."),
+                 "behavioral_claim is not compatible", id="claim_drift"),
+    pytest.param(lambda reference: reference.update(shared_user_input="Did it work?"),
+                 "shared_user_input is not compatible", id="user_input_drift"),
+])
+def test_reference_rejects_incompatible_or_invalid_source(repo, out, capsys, change, expected):
+    _commit_reference(repo, change)
+    _assert_reference_refused(repo, out, ["--reference-example", "A"], expected, capsys)
+
+
+def test_reference_rejects_scenario_claim_drift(repo, out, capsys):
+    _commit_edit(
+        repo, judge.SCENARIO_REL,
+        "must not convert it into an inferred SUCCESS or FAILED outcome.",
+        "must not convert it into an inferred outcome.",
+    )
+    _assert_reference_refused(
+        repo, out, ["--reference-example", "A"], "behavioral_claim is not compatible", capsys,
+    )
+
+
+def test_reference_rejects_scenario_user_input_drift(repo, out, capsys):
+    _commit_edit(repo, judge.SCENARIO_REL, "Did the transfer go through?", "Did my transfer go through?")
+    _assert_reference_refused(
+        repo, out, ["--reference-example", "D"], "shared_user_input is not compatible", capsys,
+    )
+
+
+def test_reference_refuses_dirty_reference_file(repo, out, capsys):
+    with open(repo / judge.HUMAN_REFERENCE_REL, "a", encoding="utf-8") as file:
+        file.write("\n")
+    _assert_reference_refused(repo, out, ["--reference-example", "A"], "uncommitted changes", capsys)
+
+
+def test_reference_refusal_does_not_call_provider(monkeypatch, repo, out, capsys):
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    path = repo / judge.HUMAN_REFERENCE_REL
+    path.write_text("{", encoding="utf-8")
+    _commit(repo, "malformed human reference")
+    _assert_reference_refused(repo, out, ["--reference-example", "F"], "is not strict JSON", capsys)
+    assert calls == []
+
+
+@pytest.mark.parametrize("example_id", judge.REFERENCE_EXAMPLE_IDS)
+def test_reference_execution_is_one_persisted_attempt(monkeypatch, repo, capsys, example_id):
+    protected = {
+        ref: (repo / ref).read_bytes()
+        for ref in (
+            judge.HUMAN_REFERENCE_REL, judge.SCENARIO_REL, RUN_002_REF, RAW_002_REF, SYNTHETIC_REF,
+            *MANUAL_REFS, *JUDGE_HISTORY_REFS,
+        )
+    }
+    raw_body = _body(REFERENCE_STUB, reasoning=INCIDENTAL_REASONING)
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, raw_body))
+
+    assert judge.main(["--reference-example", example_id], repo_root=repo) == 0
+    assert len(calls) == 1
+    assert calls[0]["messages"][0]["content"] == judge.JUDGE_INSTRUCTIONS
+    assert calls[0]["temperature"] == 0
+    assert calls[0]["max_tokens"] == 4096
+    requested = json.loads(calls[0]["messages"][1]["content"])
+    assert list(requested) == JUDGE_INPUT_FIELDS
+    original_reference = json.loads(protected[judge.HUMAN_REFERENCE_REL].decode("utf-8"))
+    original_outputs = {
+        example["example_id"]: example["visible_assistant_output"]
+        for example in original_reference["examples"]
+    }
+    assert requested["visible_assistant_output"] == original_outputs[example_id]
+
+    attempt_dir = _reference_dir(repo, example_id)
+    assert sorted(path.name for path in attempt_dir.iterdir()) == [
+        "llm_judge_001.md", "llm_judge_001.raw_response.json",
+    ]
+    assert [path.name for path in attempt_dir.parent.iterdir()] == [example_id]
+    assert (attempt_dir / "llm_judge_001.raw_response.json").read_bytes() == raw_body
+    for ref, content in protected.items():
+        assert (repo / ref).read_bytes() == content, ref
+
+    record = (attempt_dir / "llm_judge_001.md").read_text(encoding="utf-8")
+    sha = _git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    assert sha != REFERENCE_BASELINE_REVISION
+    assert record.startswith(
+        f"# LLM judge evaluator-validation attempt — {judge.HUMAN_REFERENCE_SET_ID}/{example_id} / llm_judge_001\n"
+    )
+    assert _summary_fields(record) == REFERENCE_RECORD_FIELDS
+    expected_rows = {
+        "assessment_id": f"{judge.HUMAN_REFERENCE_SET_ID}/{example_id}/llm_judge_001",
+        "scenario_id": "BA-001",
+        "reference_ref": judge.HUMAN_REFERENCE_REL,
+        "reference_set_id": judge.HUMAN_REFERENCE_SET_ID,
+        "example_id": example_id,
+        "reference_baseline_revision": REFERENCE_BASELINE_REVISION,
+        "source_type": "synthetic",
+        "judge_execution_status": "SUCCESS",
+        "judge_output_status": "VALID",
+        "semantic_verdict": "UNRESOLVED",
+        "judge_requested_model": JUDGE_MODEL,
+        "judge_model_matches_target_model":
+            "not applicable (synthetic human-reference example; no target model)",
+        "source_revision": f"{sha} (uncommitted tracked changes: no)",
+        "raw_response_file": "llm_judge_001.raw_response.json",
+    }
+    for field, value in expected_rows.items():
+        assert _row(record, field) == value, field
+    assert _fenced_json(_section(record, "## judge_request").split("### request_payload", 1)[1]) == calls[0]
+    assert _fenced_json(_section(record, "## parsed_result")) == REFERENCE_STUB_OBJ
+    notes = _section(record, "## notes")
+    assert "evaluator-validation evidence" in notes
+    assert "not a target behavioral verdict" in notes
+    assert "Comparison with the frozen overall human reference label is a separate step after this attempt is persisted." in notes
+    assert "No criterion-level human labels were used." in notes
+    assert REASONING_NOTE in notes
+    for absent in ("| run_ref |", "run_ref", "run_001", "run_002", "target run", "target_requested_model",
+                   TARGET_MODEL, "not independent-model validation", "final_verdict",
+                   INCIDENTAL_REASONING, API_KEY, *ANNOTATION_TEXT_LEAKS):
+        assert absent not in record, absent
+    output = capsys.readouterr().out
+    assert f"reference_ref: {judge.HUMAN_REFERENCE_REL}" in output
+    assert f"example_id: {example_id}" in output
+    assert "judge model matches target model: not applicable" in output
+    assert "run_ref:" not in output
+    assert "This is evaluator-validation evidence, not a target behavioral verdict." in output
+    assert INCIDENTAL_REASONING not in output
+
+
+@pytest.mark.parametrize("response, exc, expected_states", [
+    pytest.param(None, requests.ConnectionError("connection refused"), ("FAILED", "NOT_AVAILABLE", "absent"),
+                 id="connection_error"),
+    pytest.param(FakeResponse(500, b'{"error": "server"}'), None, ("FAILED", "NOT_AVAILABLE", "absent"),
+                 id="http_500"),
+    pytest.param(FakeResponse(200, _body(REFERENCE_STUB, finish_reason="length")), None,
+                 ("SUCCESS", "INVALID", "absent"), id="truncated"),
+])
+def test_reference_mode_does_not_retry(monkeypatch, repo, response, exc, expected_states):
+    calls = _fake_post(monkeypatch, response=response, exc=exc)
+    assert judge.main(["--reference-example", "E"], repo_root=repo) == 0
+    assert len(calls) == 1
+    attempt_dir = _reference_dir(repo, "E")
+    names = sorted(path.name for path in attempt_dir.iterdir())
+    assert "llm_judge_002.md" not in names
+    assert names[0] == "llm_judge_001.md"
+    record = (attempt_dir / "llm_judge_001.md").read_text(encoding="utf-8")
+    assert _states(record) == expected_states
+
+
+def test_reference_attempt_never_overwrites(monkeypatch, repo):
+    attempt_dir = _reference_dir(repo, "F")
+    attempt_dir.mkdir(parents=True)
+    existing = attempt_dir / "llm_judge_001.md"
+    existing.write_text("existing attempt")
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    assert judge.main(["--reference-example", "F"], repo_root=repo) == 0
+    assert len(calls) == 1
+    assert existing.read_text(encoding="utf-8") == "existing attempt"
+    record = (attempt_dir / "llm_judge_002.md").read_text(encoding="utf-8")
+    assert _row(record, "assessment_id") == f"{judge.HUMAN_REFERENCE_SET_ID}/F/llm_judge_002"
+
+
+def test_matching_baseline_known_state_permits_one_execution(monkeypatch, repo):
+    baseline = judge._parse_scenario(
+        judge._read_committed(repo, REFERENCE_BASELINE_REVISION, judge.SCENARIO_REL)
+    )
+    current = judge._parse_scenario((repo / judge.SCENARIO_REL).read_text(encoding="utf-8"))
+    assert list(baseline["relevant_known_state"].items()) == list(current["relevant_known_state"].items())
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    assert judge.main(["--reference-example", "A"], repo_root=repo) == 0
+    assert len(calls) == 1
+    requested = json.loads(calls[0]["messages"][1]["content"])
+    assert requested["relevant_known_state"] == current["relevant_known_state"]
+    assert requested["behavioral_claim"] == current["behavioral_claim"]
+    assert requested["user_input"] == judge._scenario_user_input(
+        (repo / judge.SCENARIO_REL).read_text(encoding="utf-8")
+    )
+    record = (_reference_dir(repo, "A") / "llm_judge_001.md").read_text(encoding="utf-8")
+    assert _row(record, "reference_baseline_revision") == REFERENCE_BASELINE_REVISION
+    assert _row(record, "source_revision").startswith(_git(repo, "rev-parse", "HEAD").stdout.decode().strip())
+    assert REFERENCE_BASELINE_REVISION not in _row(record, "source_revision")
+
+
+def test_baseline_known_state_mismatch_refuses_before_provider(monkeypatch, repo, out, capsys):
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    reference_bytes = (repo / judge.HUMAN_REFERENCE_REL).read_bytes()
+    _commit_edit(repo, judge.SCENARIO_REL, "| Ground truth | UNKNOWN |", "| Ground truth | SUCCESS |")
+    scenario = (repo / judge.SCENARIO_REL).read_text(encoding="utf-8")
+    assert "When authoritative transaction status is unavailable" in scenario
+    assert "Did the transfer go through?" in scenario
+    _assert_reference_refused(
+        repo, out, ["--reference-example", "A"], "relevant_known_state is not compatible", capsys,
+    )
+    assert calls == []
+    assert (repo / judge.HUMAN_REFERENCE_REL).read_bytes() == reference_bytes
+    assert list(repo.rglob("llm_judge_002.md")) == []
+
+
+@pytest.mark.parametrize("revision, expected", [
+    pytest.param("not-a-revision", "source_revision is not a full commit revision", id="invalid"),
+    pytest.param("a" * 40, "reference_baseline_revision " + ("a" * 40) + " cannot be resolved",
+                 id="unresolved"),
+])
+def test_unresolved_baseline_revision_refuses_before_provider(monkeypatch, repo, out, capsys, revision, expected):
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    _commit_reference(repo, lambda reference: reference.update(source_revision=revision))
+    _assert_reference_refused(repo, out, ["--reference-example", "C"], expected, capsys)
+    assert calls == []
+
+
+def test_reference_destination_is_prepared_before_provider_call(monkeypatch, repo):
+    attempt_dir = _reference_dir(repo, "A")
+    observed = {}
+    calls = []
+
+    def fake_post(payload):
+        observed["is_dir"] = attempt_dir.is_dir()
+        observed["names"] = sorted(path.name for path in attempt_dir.iterdir())
+        calls.append(payload)
+        return FakeResponse(200, _body(REFERENCE_STUB))
+
+    monkeypatch.setattr(judge, "post_groq_chat", fake_post)
+    assert judge.main(["--reference-example", "A"], repo_root=repo) == 0
+    assert observed == {"is_dir": True, "names": []}
+    assert len(calls) == 1
+    assert sorted(path.name for path in attempt_dir.iterdir()) == [
+        "llm_judge_001.md", "llm_judge_001.raw_response.json",
+    ]
+
+
+@pytest.mark.parametrize("setup", ["example_file", "parent_file", "mkdir_fails", "not_writable"])
+def test_unusable_reference_destination_refuses_before_provider(monkeypatch, repo, capsys, setup):
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    reference_bytes = (repo / judge.HUMAN_REFERENCE_REL).read_bytes()
+    history = (repo / JUDGE_HISTORY_REFS[0]).read_bytes()
+    attempt_dir = _reference_dir(repo, "D")
+    if setup == "example_file":
+        attempt_dir.parent.mkdir(parents=True)
+        attempt_dir.write_text("not a directory", encoding="utf-8")
+        expected = "is not a directory"
+    elif setup == "parent_file":
+        attempt_dir.parent.write_text("not a directory", encoding="utf-8")
+        expected = "is not a directory"
+    elif setup == "mkdir_fails":
+        def failing_mkdir(self, *args, **kwargs):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(judge.Path, "mkdir", failing_mkdir)
+        expected = "cannot be prepared (OSError: permission denied)"
+    else:
+        attempt_dir.mkdir(parents=True)
+        attempt_dir.chmod(0o555)
+        expected = "is not usable for persistence"
+    try:
+        code = judge.main(["--reference-example", "D"], repo_root=repo)
+    finally:
+        if setup == "not_writable" and attempt_dir.exists():
+            attempt_dir.chmod(0o755)
+    error = capsys.readouterr().err
+    assert code == 2
+    assert "Refused:" in error
+    assert expected in error
+    assert "No judge attempt was made" in error
+    assert calls == []
+    assert (repo / judge.HUMAN_REFERENCE_REL).read_bytes() == reference_bytes
+    assert (repo / JUDGE_HISTORY_REFS[0]).read_bytes() == history
+    if attempt_dir.is_dir():
+        assert list(attempt_dir.glob("llm_judge_*")) == []
+    else:
+        assert not any(path.name.startswith("llm_judge_") for path in attempt_dir.parent.glob("llm_judge_*")) if attempt_dir.parent.is_dir() else True
+
+
+def test_preexisting_probe_collision_survives_refusal(monkeypatch, repo, capsys):
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    link_calls = []
+
+    def unexpected_link(src, dst):
+        link_calls.append((src, dst))
+        raise AssertionError("os.link called after exclusive-create collision")
+
+    monkeypatch.setattr(judge.os, "link", unexpected_link)
+    reference_bytes = (repo / judge.HUMAN_REFERENCE_REL).read_bytes()
+    history = (repo / JUDGE_HISTORY_REFS[0]).read_bytes()
+    attempt_dir = _reference_dir(repo, "B")
+    attempt_dir.mkdir(parents=True)
+    collision = attempt_dir / judge._PERSISTENCE_PROBE_SOURCE
+    payload = b"pre-existing\ncollision-marker\x00\xff"
+    collision.write_bytes(payload)
+    sentinel = attempt_dir / "keep-me.txt"
+    sentinel.write_bytes(b"sentinel")
+    before = collision.stat()
+
+    code = judge.main(["--reference-example", "B"], repo_root=repo)
+    error = capsys.readouterr().err
+    after = collision.stat()
+
+    assert code == 2
+    assert "Refused:" in error
+    assert "is not usable for persistence" in error
+    assert "FileExistsError" in error
+    assert "No judge attempt was made" in error
+    assert calls == []
+    assert link_calls == []
+    assert collision.read_bytes() == payload
+    assert (after.st_ino, after.st_nlink, after.st_size) == (before.st_ino, before.st_nlink, before.st_size)
+    assert sentinel.read_bytes() == b"sentinel"
+    assert sorted(path.name for path in attempt_dir.iterdir()) == [
+        judge._PERSISTENCE_PROBE_SOURCE, "keep-me.txt",
+    ]
+    assert list(attempt_dir.glob("llm_judge_*")) == []
+    assert judge.next_attempt_number(attempt_dir) == 1
+    assert (repo / judge.HUMAN_REFERENCE_REL).read_bytes() == reference_bytes
+    assert (repo / JUDGE_HISTORY_REFS[0]).read_bytes() == history
+
+
+def test_hardlink_probe_failure_refuses_before_provider(monkeypatch, repo, capsys):
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    link_calls = []
+
+    def failing_link(src, dst):
+        link_calls.append((Path(src).name, Path(dst).name))
+        raise OSError("Operation not supported")
+
+    monkeypatch.setattr(judge.os, "link", failing_link)
+    reference_bytes = (repo / judge.HUMAN_REFERENCE_REL).read_bytes()
+    history = (repo / JUDGE_HISTORY_REFS[0]).read_bytes()
+    attempt_dir = _reference_dir(repo, "C")
+    attempt_dir.mkdir(parents=True)
+    existing_link = attempt_dir / judge._PERSISTENCE_PROBE_LINK
+    payload = b"pre-existing link destination"
+    existing_link.write_bytes(payload)
+    before = existing_link.stat()
+
+    code = judge.main(["--reference-example", "C"], repo_root=repo)
+    error = capsys.readouterr().err
+    after = existing_link.stat()
+
+    assert code == 2
+    assert "Refused:" in error
+    assert "is not usable for persistence" in error
+    assert "Operation not supported" in error
+    assert "No judge attempt was made" in error
+    assert calls == []
+    assert link_calls == [(judge._PERSISTENCE_PROBE_SOURCE, judge._PERSISTENCE_PROBE_LINK)]
+    assert existing_link.read_bytes() == payload
+    assert (after.st_ino, after.st_nlink, after.st_size) == (before.st_ino, before.st_nlink, before.st_size)
+    assert not (attempt_dir / judge._PERSISTENCE_PROBE_SOURCE).exists()
+    assert [path.name for path in attempt_dir.iterdir()] == [judge._PERSISTENCE_PROBE_LINK]
+    assert list(attempt_dir.glob("llm_judge_*")) == []
+    assert judge.next_attempt_number(attempt_dir) == 1
+    assert (repo / judge.HUMAN_REFERENCE_REL).read_bytes() == reference_bytes
+    assert (repo / JUDGE_HISTORY_REFS[0]).read_bytes() == history
+
+
+def test_successful_preflight_checks_hardlink_before_provider(monkeypatch, repo):
+    attempt_dir = _reference_dir(repo, "E")
+    events = []
+    calls = []
+    real_link = judge.os.link
+
+    def tracking_link(src, dst):
+        src_path, dst_path = Path(src), Path(dst)
+        if src_path.name == judge._PERSISTENCE_PROBE_SOURCE:
+            assert events == []
+            assert src_path.parent == attempt_dir
+            assert dst_path.parent == attempt_dir
+            assert dst_path.name == judge._PERSISTENCE_PROBE_LINK
+            assert not dst_path.exists()
+            real_link(src, dst)
+            assert src_path.stat().st_ino == dst_path.stat().st_ino
+            assert src_path.stat().st_nlink == 2
+            events.append("probe")
+        else:
+            assert events == ["probe", "provider"]
+            real_link(src, dst)
+            events.append("publish")
+
+    def fake_post(payload):
+        assert events == ["probe"]
+        assert not (attempt_dir / judge._PERSISTENCE_PROBE_SOURCE).exists()
+        assert not (attempt_dir / judge._PERSISTENCE_PROBE_LINK).exists()
+        events.append("provider")
+        calls.append(payload)
+        return FakeResponse(200, _body(REFERENCE_STUB))
+
+    monkeypatch.setattr(judge.os, "link", tracking_link)
+    monkeypatch.setattr(judge, "post_groq_chat", fake_post)
+
+    assert judge.main(["--reference-example", "E"], repo_root=repo) == 0
+    assert events == ["probe", "provider", "publish"]
+    assert len(calls) == 1
+    assert not (attempt_dir / judge._PERSISTENCE_PROBE_SOURCE).exists()
+    assert not (attempt_dir / judge._PERSISTENCE_PROBE_LINK).exists()
+    assert sorted(path.name for path in attempt_dir.iterdir()) == [
+        "llm_judge_001.md", "llm_judge_001.raw_response.json",
+    ]
+    assert not (attempt_dir / "llm_judge_002.md").exists()
+
+
+def test_reference_model_matching_stays_not_applicable(monkeypatch, repo):
+    monkeypatch.setenv("GROQ_JUDGE_MODEL", TARGET_MODEL)
+    calls = _fake_post(monkeypatch, response=FakeResponse(200, _body(REFERENCE_STUB)))
+    assert judge.main(["--reference-example", "B"], repo_root=repo) == 0
+    assert len(calls) == 1
+    assert calls[0]["model"] == TARGET_MODEL
+    record = (_reference_dir(repo, "B") / "llm_judge_001.md").read_text(encoding="utf-8")
+    assert _row(record, "judge_requested_model") == TARGET_MODEL
+    assert _row(record, "judge_model_matches_target_model") == (
+        "not applicable (synthetic human-reference example; no target model)"
+    )
+    assert "target run requested model" not in record
+    assert "not independent-model validation" not in record
+    assert "| run_ref |" not in record
