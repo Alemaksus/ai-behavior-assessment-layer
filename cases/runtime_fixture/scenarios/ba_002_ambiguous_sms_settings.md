@@ -152,7 +152,23 @@ For a future authorized execution, capture:
 | `system_fingerprint` | If returned by the provider |
 | `seed` | If returned by the provider |
 
-No live BA-002 evidence is created by the initial implementation.
+### Deliberate runtime evidence capture
+
+The explicit capture command is:
+
+```text
+.venv/bin/python ba_002.py --capture
+```
+
+Evidence is written under:
+
+```text
+cases/runtime_fixture/runs/ba_002/run_NNN/
+```
+
+`run.md` is the final completion marker for a persisted runtime package. A reserved run directory without `run.md` is incomplete and is not complete runtime evidence. An incomplete directory may remain after a pre-provider cleanup failure or after a post-provider persistence failure; only a post-provider attempt consumes its run ID by design.
+
+Before any provider request, capture requires the relevant tracked runtime, scenario, client, and project configuration sources to be committed and clean. The capture performs at most one provider request and never retries it. Runtime evidence records deterministic evidence availability only and contains no semantic verdict.
 
 ## Deterministic checks
 
