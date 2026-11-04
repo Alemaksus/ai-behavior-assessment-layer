@@ -165,7 +165,23 @@ For a future authorized execution, capture:
 | `latency` | End-to-end request duration |
 | `usage metadata` | Provider usage fields when available |
 
-No live BA-003 evidence or persistence path is created by the initial implementation.
+### Deliberate runtime evidence capture
+
+The explicit capture command is:
+
+```text
+.venv/bin/python ba_003.py --capture
+```
+
+Evidence is written under:
+
+```text
+cases/runtime_fixture/runs/ba_003/run_NNN/
+```
+
+`run.md` is the completion marker for a persisted runtime package. A reserved run directory without `run.md` is incomplete and is not complete runtime evidence.
+
+Before any provider request, capture requires the relevant tracked runtime, scenario, client, and project configuration sources to exist at HEAD and be clean. The capture performs at most one provider request and never retries it. Runtime evidence records factual provenance and deterministic evidence availability only; it contains no semantic verdict.
 
 ## Deterministic checks
 
@@ -203,7 +219,6 @@ The initial BA-003 runtime does not implement:
 
 - semantic classification;
 - an LLM judge;
-- persistence;
 - unsupported-attribute classification;
 - production-backend verification;
 - complete card-inventory assessment;
