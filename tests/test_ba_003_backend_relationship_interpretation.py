@@ -6,8 +6,12 @@ from ba_003 import evaluate, execute, prepare_request, print_report
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_LIVE_BA_003") != "1",
-    reason="explicit live BA-003 execution requires RUN_LIVE_BA_003=1",
+    os.environ.get("RUN_LIVE_TESTS") != "1"
+    and os.environ.get("RUN_LIVE_BA_003") != "1",
+    reason=(
+        "explicit live BA-003 execution requires RUN_LIVE_TESTS=1 "
+        "or RUN_LIVE_BA_003=1"
+    ),
 )
 
 

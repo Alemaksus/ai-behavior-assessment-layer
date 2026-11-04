@@ -106,21 +106,78 @@ The older `cases/buddy_ai/` and `cases/lindy_ai/` directories contain explorator
 
 ## Running offline tests
 
-The project requires Python 3.11 or newer. Dependency installation may require network access. Once dependencies are available, the selected test command itself does not require provider or network calls. From the repository root:
+The project requires Python 3.11 or newer. Creating the environment is local; dependency installation may require package-index network access:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
+```
 
+The default test suite is offline-safe. Live tests are skipped unless explicitly enabled, and missing Groq credentials do not prevent ordinary collection:
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+The previously reviewed offline-only selection is:
+
+```bash
 .venv/bin/python -m pytest \
   tests/test_ba_001_offline.py \
   tests/test_ba_001_judge_offline.py \
   tests/test_ba_002_offline.py \
   tests/test_ba_003_offline.py \
+  tests/test_live_test_guards_offline.py \
   -q
 ```
 
-Do not use repository-wide `pytest` as an offline command: the repository also contains explicitly live tests, including a Groq smoke test and target execution entry points. Live execution requires separate authorization, credentials, and evidence-handling discipline.
+These commands exercise local code and synthetic/mocked responses only. They do not require provider calls.
+
+## Live execution and evidence capture
+
+Live execution is separate from offline testing and may incur Groq API charges. It requires:
+
+```text
+GROQ_API_KEY=<your Groq API key>
+GROQ_MODEL=openai/gpt-oss-20b
+```
+
+The shared client calls `load_dotenv()` on the repository-root `.env` file. `.env` is excluded by `.gitignore` and must not be committed.
+
+To run one explicitly selected non-persisting live test, set `RUN_LIVE_TESTS=1` for that test file:
+
+```bash
+RUN_LIVE_TESTS=1 .venv/bin/python -m pytest tests/test_groq_smoke.py -q -s
+RUN_LIVE_TESTS=1 .venv/bin/python -m pytest tests/test_ba_001_unknown_transaction_status.py -q -s
+RUN_LIVE_TESTS=1 .venv/bin/python -m pytest tests/test_ba_002_ambiguous_sms_settings.py -q -s
+RUN_LIVE_TESTS=1 .venv/bin/python -m pytest tests/test_ba_003_backend_relationship_interpretation.py -q -s
+```
+
+Each command above may make a paid provider request. Enabling `RUN_LIVE_TESTS=1` for repository-wide pytest would enable every live test and is not recommended.
+
+The deliberate evidence-capture commands also call Groq and create new persisted run artifacts:
+
+```bash
+.venv/bin/python ba_001.py
+.venv/bin/python ba_002.py --capture
+.venv/bin/python ba_003.py --capture
+```
+
+Valid `ba_001_judge.py` executions make a separate evaluator call and additionally require `GROQ_JUDGE_MODEL`. Capture and judge commands use no automatic provider retry, but each successful preflight starts a real attempt and may consume a new run or assessment ID.
+
+Existing evidence under `cases/runtime_fixture/runs/`, `cases/runtime_fixture/assessments/`, and `evaluator_validation/` is frozen historical evidence. Do not overwrite, edit, or reconstruct it. To inspect the released report without calling a provider:
+
+```bash
+git show v1.0.0:reports/behavioral_release_readiness_assessment_v1_0.md
+```
+
+A passing behavioral criterion applies only to its frozen claim and recorded run. It is not evidence of general model accuracy, reliability, or complete response correctness.
+
+## License
+
+Original project code is licensed under the [MIT License](LICENSE).
+
+That license does not purport to relicense third-party product names or materials, model weights, provider services, or provider-generated response artifacts and metadata. Those materials remain subject to their applicable terms. The raw responses are included as assessment evidence; review the relevant provider and model terms before redistributing them.
 
 ## Scope and limitations
 
